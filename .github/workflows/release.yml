@@ -34,8 +34,14 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          # Pass the template expansion through an env var so the
+          # untrusted input never lands directly in the shell script.
+          # Mitigates the shell-injection class flagged by Semgrep's
+          # github-actions.security.run-shell-injection rule.
+          REF_INPUT: ${{ inputs.tag || github.ref_name }}
         run: |
-          ref="${{ inputs.tag || github.ref_name }}"
+          ref="$REF_INPUT"
           # Strip refs/tags/ if present (defensive)
           ref="${ref#refs/tags/}"
           # Strip leading v for the bare numeric tag

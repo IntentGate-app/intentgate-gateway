@@ -306,6 +306,18 @@ spec:
       containers:
         - name: bench
           image: alpine:3.20
+          # Partial hardening: we can't runAsNonRoot or readOnlyRootFilesystem
+          # here because the script uses `apk add` at runtime to install
+          # vegeta + jq + curl (alpine:3.20 doesn't have them baked in).
+          # A future improvement would be a pre-built bench image that
+          # includes all deps, allowing full non-root + readonly-rootfs.
+          # For now we drop all capabilities and disable privilege
+          # escalation — that's the most-impactful hardening that
+          # doesn't break the apk-install step.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           command: ["sh", "-c"]
           args:
             - |
