@@ -15,7 +15,15 @@ flowchart LR
     subgraph Customer["Your infrastructure"]
         direction LR
         Agent["AI Agent<br/>your code + LLM"]
-        Gateway["IntentGate Gateway<br/>4-check pipeline<br/>+ memory provenance (opt-in)"]
+        subgraph Gateway["IntentGate Gateway"]
+            direction LR
+            Cap[capability]
+            Intent[intent]
+            Prov["memory provenance<br/>opt-in, default off"]:::optional
+            Policy[policy]
+            Budget[budget]
+            Cap --> Intent --> Prov --> Policy --> Budget
+        end
         Tools["Tool servers<br/>APIs / MCP / internal services"]
     end
 
@@ -26,18 +34,19 @@ flowchart LR
     Approver(["On-call human<br/>via Approvals queue"])
 
     User -->|"natural-language<br/>prompt"| Agent
-    Agent -->|"tools/call<br/>+ Bearer capability token<br/>+ X-Intent-Prompt"| Gateway
-    Gateway -->|"only if all 4 checks pass"| Tools
-    Tools --> Gateway
-    Gateway --> Agent
+    Agent -->|"tools/call<br/>+ Bearer capability token<br/>+ X-Intent-Prompt"| Cap
+    Budget -->|"if all checks pass"| Tools
+    Tools --> Agent
     Agent --> User
 
     IdP -.->|"OIDC operator sign-in"| Console
-    Console <-->|"admin API"| Gateway
+    Console <-.->|"admin API"| Gateway
     Gateway ==>|"one event per decision"| DB
     DB -.->|"streaming export"| SIEM
-    Gateway -.->|"if policy says escalate"| Approver
+    Policy -.->|"if escalate"| Approver
     Approver -.->|"approve / reject"| Console
+
+    classDef optional stroke-dasharray: 5 5,fill:#fef2f2,stroke:#dc2626
 ```
 
 The dotted lines are operational paths (who watches the gateway, who handles escalations); the solid lines are the request hot path. Audit goes into Postgres synchronously inside the same transaction as the chain head advance, so an event is durable before the response leaves the gateway.
