@@ -15,7 +15,7 @@ flowchart LR
     subgraph Customer["Your infrastructure"]
         direction LR
         Agent["AI Agent<br/>your code + LLM"]
-        Gateway["IntentGate Gateway<br/>4-check pipeline"]
+        Gateway["IntentGate Gateway<br/>4-check pipeline<br/>+ memory provenance (opt-in)"]
         Tools["Tool servers<br/>APIs / MCP / internal services"]
     end
 
@@ -51,6 +51,7 @@ flowchart LR
     Req["tools/call request<br/>+ Bearer token<br/>+ X-Intent-Prompt"]
     Cap{"1. Capability<br/>token valid?<br/>tool in whitelist?"}
     Intent{"2. Intent<br/>tool in<br/>extracted intent?"}
+    Prov{"Memory provenance<br/>opt-in, default off<br/>HMAC + chain valid?"}
     Policy{"3. Policy<br/>Rego decision?"}
     Budget{"4. Budget<br/>under max_calls?"}
     Forward["Forward to<br/>upstream tool server"]
@@ -60,8 +61,10 @@ flowchart LR
     Req --> Cap
     Cap -->|"pass"| Intent
     Cap -->|"fail: -32010"| Block
-    Intent -->|"pass"| Policy
+    Intent -->|"pass"| Prov
     Intent -->|"fail: -32011"| Block
+    Prov -->|"pass / disabled"| Policy
+    Prov -->|"fail: -32014"| Block
     Policy -->|"allow"| Budget
     Policy -->|"block: -32012"| Block
     Policy -->|"escalate"| Escalate
@@ -69,9 +72,14 @@ flowchart LR
     Budget -->|"exhausted: -32013"| Block
     Escalate -->|"approved by human"| Forward
     Escalate -->|"rejected / timeout"| Block
+
+    classDef optional stroke-dasharray: 5 5,fill:#fef2f2,stroke:#dc2626
+    class Prov optional
 ```
 
 Four independent failure modes, four distinct JSON-RPC error codes downstream consumers can branch on. Each defends against a different class of agent failure: stolen credentials (capability), prompt injection (intent), over-broad permissions (policy), runaway loops (budget). Escalate is the policy's "I'm not sure, ask a human" outcome — the request pauses until an operator decides via the approvals queue.
+
+The dashed node — memory provenance — is an opt-in fifth check that verifies the memory entries which shaped the tool call are HMAC-signed under the same capability trust boundary. It defends against the sophisticated case of OWASP AAI03 (Memory Poisoning) where attacker-planted memory entries align with the user's prompt (passing the intent check) but corrupt the tool call's arguments. When `INTENTGATE_PROVENANCE_ENABLED` is unset (the default), the node is a transparent pass-through and the pipeline behaves exactly as the four-check description above. See [`05-memory-provenance.md`](./05-memory-provenance.md) for the wire contract, SDK integration, and the `-32014` failure semantics.
 
 | # | Guide | Audience | Time |
 |---|-------|----------|------|
@@ -101,6 +109,8 @@ IntentGate evaluates each tool call through four independent checks before it fo
 2. **Intent** — Does the agent's declared purpose (the `X-Intent-Prompt` header, run through the intent extractor) include this tool in its `allowed_tools` list? Failure: `-32011`. Defends against prompt injection — an attacker can't change the user's intent into one that suddenly needs `transfer_funds`.
 3. **Policy** — Does the loaded Rego policy say allow / block / escalate for this call given the agent, tool, args, and intent? Failure: `-32012`. Defends against over-broad permissions — your policy can constrain what's allowed even when capability and intent already passed.
 4. **Budget** — Is the agent's per-token call counter still under its `max_calls` cap? Failure: `-32013`. Defends against runaway loops and metering excess.
+
+An optional fifth check, **memory provenance**, is available as an opt-in deepening of the intent check — disabled by default, enabled per-deployment via `INTENTGATE_PROVENANCE_ENABLED=true`. It verifies that memory entries which shaped the tool call were HMAC-signed under the same capability trust boundary, closing the sophisticated case of OWASP AAI03 (Memory Poisoning). Failure: `-32014`. See [`05-memory-provenance.md`](./05-memory-provenance.md) for the cross-language wire contract and SDK integration.
 
 Every decision (allow at any stage, block at any stage, escalate from policy to human approval) emits one audit event into a per-tenant cryptographic hash chain. That chain is what [Guide 04](./04-audit-verify.md) shows you how to query and verify.
 
