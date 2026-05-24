@@ -35,8 +35,6 @@ shaping the call are themselves trustworthy.
 
 ## Runtime architecture
 
-![Three-phase runtime architecture: mint phase derives a memory signing key from the capability token via HKDF; write phase has the agent sign memory entries locally with HMAC-SHA256 and store in the customer's memory backend; tool-call phase has the agent attach the signed envelopes in the X-Intent-Memory-Provenance header, where the gateway re-derives the session key, verifies each HMAC, and walks the per-session hash chain.](./diagrams/aai03-memory-provenance-architecture.svg)
-
 Three phases, no new runtime component:
 
 1. **Mint** — `igctl mint --with-memory-signing-key` derives a per-session 32-byte signing key from the master key via HKDF-SHA256 (salt = capability token's `jti`). The key is bundled into the mint response, never persisted server-side, and travels under the same trust boundary as the capability token itself.
