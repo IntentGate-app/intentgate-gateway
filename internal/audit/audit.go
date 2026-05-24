@@ -61,6 +61,12 @@ const (
 	CheckNone       Check = ""
 	CheckCapability Check = "capability"
 	CheckIntent     Check = "intent"
+	// CheckProvenance is the optional fifth check (chronologically
+	// third in pipeline order, between intent and policy) added for
+	// AAI03 memory poisoning defense. Only emitted when the tenant
+	// has provenance enabled. See internal/provenance and the design
+	// doc at memos/aai03-memory-provenance-design.md.
+	CheckProvenance Check = "provenance"
 	CheckPolicy     Check = "policy"
 	CheckBudget     Check = "budget"
 	CheckUpstream   Check = "upstream"

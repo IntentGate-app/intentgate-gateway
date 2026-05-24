@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/auditstore"
 	"github.com/NetGnarus/intentgate-gateway/internal/capability"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
+	"github.com/NetGnarus/intentgate-gateway/internal/provenance"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
 	"github.com/NetGnarus/intentgate-gateway/internal/siem"
 )
@@ -237,6 +239,16 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			Tools      []string `json:"tools"`
 			MaxCalls   int      `json:"max_calls"`
 			StepUp     bool     `json:"step_up"`
+			// WithMemorySigningKey opts the response into including
+			// the AAI03 memory-provenance signing key derived from
+			// the master key + this token's jti. Default false —
+			// most callers don't need it. SDKs that wrap a customer
+			// memory backend set this to true so they have the key
+			// to sign envelopes with. Including the key is harmless
+			// even when the gateway's ProvenanceEnabled is false (it
+			// just gives the agent a key the gateway will never
+			// consume), but operators may wish to keep it tight.
+			WithMemorySigningKey bool `json:"with_memory_signing_key"`
 		}
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
 		dec.DisallowUnknownFields()
@@ -346,12 +358,36 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			expiresAt = opts.Expiry.UTC().Format(time.RFC3339)
 		}
 		cfg.Logger.Info("token minted", "jti", tok.ID, "subject", body.Subject, "ttl_seconds", body.TTLSeconds, "tools", len(tools), "max_calls", body.MaxCalls)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+
+		response := map[string]any{
 			"token":      encoded,
 			"jti":        tok.ID,
 			"subject":    body.Subject,
 			"expires_at": expiresAt,
-		})
+		}
+
+		// AAI03 memory provenance: when the caller opts in, derive the
+		// session signing key (HKDF off the master key + this token's
+		// jti) and include it in the response. The SDK uses it to
+		// HMAC-sign memory envelopes; the gateway re-derives the same
+		// key at tools/call time from MasterKey + capability.jti, so
+		// the key never has to travel separately or be stored in a
+		// shared keystore. See internal/provenance and the design doc.
+		if body.WithMemorySigningKey {
+			key, err := provenance.DeriveSessionKey(cfg.MasterKey, tok.ID)
+			if err != nil {
+				// Should be impossible — MasterKey was checked
+				// non-empty above and tok.ID is freshly minted. Log
+				// and continue without the key rather than fail the
+				// whole mint (the token itself is still useful).
+				cfg.Logger.Error("provenance signing key derivation failed",
+					"jti", tok.ID, "err", err)
+			} else {
+				response["memory_signing_key"] = base64.RawURLEncoding.EncodeToString(key)
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(response)
 	})
 }
 

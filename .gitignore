@@ -25,3 +25,7 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Python bytecode caches in example/test code
+**/__pycache__/
+*.pyc

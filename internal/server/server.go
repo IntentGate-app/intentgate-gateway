@@ -114,6 +114,12 @@ type Config struct {
 	// policies. Read from INTENTGATE_AUDIT_PERSIST_ARG_VALUES at
 	// startup; see audit.ParseRedactionMode.
 	ArgRedaction audit.RedactionMode
+	// ProvenanceEnabled turns on the opt-in AAI03 memory-provenance
+	// check (pipeline check 3, between intent and policy). Read from
+	// INTENTGATE_PROVENANCE_ENABLED at startup. Off by default;
+	// gateway runs as the documented four-check pipeline unchanged
+	// when false. See internal/provenance and the design doc.
+	ProvenanceEnabled bool
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -175,6 +181,7 @@ func New(cfg Config) *http.Server {
 		Approvals:         cfg.Approvals,
 		ApprovalTimeout:   cfg.ApprovalTimeout,
 		ArgRedaction:      cfg.ArgRedaction,
+		ProvenanceEnabled: cfg.ProvenanceEnabled,
 	}))
 
 	// Prometheus scrape endpoint. Behind a flag because exposing

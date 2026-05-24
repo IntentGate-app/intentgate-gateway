@@ -170,6 +170,14 @@ func main() {
 	requireCap := envOr("INTENTGATE_REQUIRE_CAPABILITY", "") == "true"
 	requireIntent := envOr("INTENTGATE_REQUIRE_INTENT", "") == "true"
 	requireBudget := envOr("INTENTGATE_REQUIRE_BUDGET", "") == "true"
+	// Opt-in AAI03 (Memory Poisoning) defense. Off by default — the
+	// gateway runs as the documented four-check pipeline. When set
+	// to "true", a fifth check (provenance) runs between intent and
+	// policy: requests carrying X-Intent-Memory-Provenance have
+	// their declared memory entries HMAC-verified against a session
+	// key derived from the capability token's jti. See
+	// internal/provenance and memos/aai03-memory-provenance-design.md.
+	provenanceEnabled := envOr("INTENTGATE_PROVENANCE_ENABLED", "") == "true"
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -475,6 +483,7 @@ func main() {
 		Approvals:             approvalsStore,
 		ApprovalTimeout:       approvalTimeout,
 		ArgRedaction:          argRedaction,
+		ProvenanceEnabled:     provenanceEnabled,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,

@@ -94,6 +94,17 @@ type MCPHandlerConfig struct {
 	// ever logging free-form text. Read from
 	// INTENTGATE_AUDIT_PERSIST_ARG_VALUES at startup.
 	ArgRedaction audit.RedactionMode
+	// ProvenanceEnabled turns on the opt-in AAI03 memory-provenance
+	// check (pipeline check 3, between intent and policy). When
+	// false (the default), the runProvenanceCheck stage is a no-op
+	// and the gateway behaves exactly as the documented four-check
+	// pipeline. When true, requests carrying an
+	// X-Intent-Memory-Provenance header have their memory entries
+	// verified against the session signing key derived from the
+	// capability token's jti; failures return CodeProvenanceFailed
+	// (-32014). Read from INTENTGATE_PROVENANCE_ENABLED at startup.
+	// See internal/provenance and memos/aai03-memory-provenance-design.md.
+	ProvenanceEnabled bool
 }
 
 type mcpHandler struct {
@@ -102,7 +113,7 @@ type mcpHandler struct {
 
 // NewMCPHandler returns the HTTP handler for POST /v1/mcp.
 //
-// Pipeline (v0.1):
+// Pipeline:
 //
 //  1. Parse the JSON-RPC envelope.
 //  2. Dispatch on method. Only "tools/call" is implemented.
@@ -113,12 +124,20 @@ type mcpHandler struct {
 //     extractor is configured, the gateway extracts structured intent
 //     (cached) and verifies the requested tool is permitted by it.
 //     Returns CodeIntentFailed (-32011) on failure.
-//  5. Policy check: evaluate the request against the configured Rego
+//  5. Provenance check (OPT-IN): when ProvenanceEnabled is true and
+//     the request carries an X-Intent-Memory-Provenance header, the
+//     gateway re-derives the session signing key from the capability
+//     token's jti, verifies the HMAC over each declared memory entry,
+//     and walks the per-session prev_hash chain. Returns
+//     CodeProvenanceFailed (-32014) on failure. Closes the
+//     sophisticated AAI03 (Memory Poisoning) case. See
+//     memos/aai03-memory-provenance-design.md.
+//  6. Policy check: evaluate the request against the configured Rego
 //     policy bundle. Returns CodePolicyFailed (-32012) on deny.
-//  6. Budget check: increment the per-token counter, deny when any
+//  7. Budget check: increment the per-token counter, deny when any
 //     max_calls caveat in the verified token is exceeded. Returns
 //     CodeBudgetFailed (-32013) on deny.
-//  7. Return the stub allow response.
+//  8. Return the stub allow response.
 func NewMCPHandler(cfg MCPHandlerConfig) http.Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -238,7 +257,32 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			"intent check failed", intResult.err.Error())
 	}
 
-	// Check 3: policy (OPA / Rego).
+	// Check 3 (OPT-IN): provenance. Only fires when the operator has
+	// turned on the AAI03 memory-provenance feature for this gateway.
+	// When disabled, the stage is a no-op and the pipeline behaves
+	// exactly as the four-check pipeline always has. When enabled,
+	// rejects requests whose declared memory entries fail HMAC or
+	// chain verification (CodeProvenanceFailed = -32014).
+	var capJTI string
+	if capResult.token != nil {
+		capJTI = capResult.token.ID
+	}
+	provStart := time.Now()
+	provResult := h.runProvenanceCheck(ctx, r.Header.Get(HeaderIntentMemoryProvenance), capJTI)
+	h.cfg.Metrics.ObserveCheck("provenance", checkDecision(provResult.err, provResult.summary), time.Since(provStart))
+	if provResult.err != nil {
+		h.cfg.Logger.Info("mcp tools/call blocked",
+			"tool", params.Name, "check", "provenance",
+			"agent", capResult.agentID,
+			"err_kind", provResult.errKind,
+			"reason", provResult.err.Error())
+		h.emitAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, audit.CheckProvenance, provResult.err.Error(), start, 0)
+		return mcp.NewErrorResponse(req.ID, mcp.CodeProvenanceFailed,
+			"provenance check failed", provResult.err.Error())
+	}
+
+	// Check 4: policy (OPA / Rego).
 	polStart := time.Now()
 	polResult := h.runPolicyCheck(ctx, params, capResult, intResult)
 	h.cfg.Metrics.ObserveCheck("policy", checkDecision(polResult.err, polResult.summary), time.Since(polStart))
