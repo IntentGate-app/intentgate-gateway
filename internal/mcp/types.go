@@ -90,6 +90,14 @@ const (
 	CodeIntentFailed     = -32011 // Intent check failed (call not in declared intent).
 	CodePolicyFailed     = -32012 // Policy check failed (OPA denied).
 	CodeBudgetFailed     = -32013 // Budget or taint check failed.
+	// CodeProvenanceFailed is returned when the new memory provenance
+	// check (introduced for AAI03 — see internal/provenance and the
+	// memos/aai03-memory-provenance-design.md design doc) rejects a
+	// tool call because the X-Intent-Memory-Provenance header carries
+	// an entry whose HMAC does not verify, whose prev_hash chain is
+	// broken, or whose envelope is structurally malformed. Opt-in
+	// feature; not emitted unless the tenant has provenance enabled.
+	CodeProvenanceFailed = -32014
 )
 
 // NewErrorResponse builds a JSON-RPC 2.0 error response.
