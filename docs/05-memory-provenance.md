@@ -33,6 +33,20 @@ shaping the call are themselves trustworthy.
 
 ---
 
+## Runtime architecture
+
+![Three-phase runtime architecture: mint phase derives a memory signing key from the capability token via HKDF; write phase has the agent sign memory entries locally with HMAC-SHA256 and store in the customer's memory backend; tool-call phase has the agent attach the signed envelopes in the X-Intent-Memory-Provenance header, where the gateway re-derives the session key, verifies each HMAC, and walks the per-session hash chain.](./diagrams/aai03-memory-provenance-architecture.svg)
+
+Three phases, no new runtime component:
+
+1. **Mint** — `igctl mint --with-memory-signing-key` derives a per-session 32-byte signing key from the master key via HKDF-SHA256 (salt = capability token's `jti`). The key is bundled into the mint response, never persisted server-side, and travels under the same trust boundary as the capability token itself.
+2. **Write** — the agent's SDK wraps each memory entry in an envelope (`id`, `session_id`, `timestamp`, `prev_hash`, `data`, `hmac`), signs it locally with the per-session key, and stores the envelope in the customer's existing memory backend. The gateway is not in the write path.
+3. **Tool call** — the agent attaches the envelopes that backed the call in an `X-Intent-Memory-Provenance` header. The gateway re-derives the session key from the bearer token, recomputes the HMAC over the canonical bytes, walks the hash chain, and either passes the request through to policy or returns `-32014` with a structured audit row naming the failed envelope.
+
+The runtime topology is otherwise identical to a non-provenance deployment — one binary, one capability-token trust boundary, one audit chain.
+
+---
+
 ## Wire contract (the part you cannot break)
 
 Three primitives, in this exact form:

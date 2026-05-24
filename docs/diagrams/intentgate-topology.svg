@@ -1,0 +1,185 @@
+<svg viewBox="0 0 960 660" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif" role="img">
+  <title>IntentGate — Runtime Topology</title>
+  <desc>Where the IntentGate gateway sits in the customer's infrastructure. The gateway authorizes every individual agent-to-tool call through five checks. Identity, audit, and operator paths are shown as supporting structures around the central request hot path.</desc>
+
+  <!-- Background -->
+  <rect width="960" height="660" fill="#ffffff"/>
+
+  <!-- Title block -->
+  <text x="480" y="34" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">
+    IntentGate — Runtime Topology
+  </text>
+  <text x="480" y="56" text-anchor="middle" font-size="12" fill="#475569">
+    Authorization gateway between the AI agent and its tool servers
+  </text>
+  <text x="480" y="74" text-anchor="middle" font-size="11" font-style="italic" fill="#64748b">
+    One binary per tenant — capability tokens are the trust boundary, audit chain is per-tenant
+  </text>
+
+  <!-- Divider -->
+  <line x1="40" y1="94" x2="920" y2="94" stroke="#e2e8f0" stroke-width="1"/>
+
+  <!-- ============== REQUEST HOT PATH ============== -->
+  <text x="50" y="120" font-size="11" font-weight="700" fill="#0369a1" letter-spacing="1.5">REQUEST HOT PATH</text>
+
+  <!-- End user -->
+  <rect x="40" y="160" width="110" height="60" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="95" y="184" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">End user</text>
+  <text x="95" y="202" text-anchor="middle" font-size="10" fill="#64748b">prompt</text>
+
+  <line x1="155" y1="190" x2="195" y2="190" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- AI Agent -->
+  <rect x="200" y="155" width="140" height="70" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="270" y="179" text-anchor="middle" font-size="13" font-weight="600" fill="#0f172a">AI Agent</text>
+  <text x="270" y="196" text-anchor="middle" font-size="10" fill="#64748b">your code + LLM</text>
+  <text x="270" y="212" text-anchor="middle" font-size="10" fill="#64748b">+ IntentGate SDK</text>
+
+  <!-- arrow with annotated request -->
+  <line x1="345" y1="190" x2="395" y2="190" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="370" y="175" text-anchor="middle" font-size="9" font-family="ui-monospace, Menlo, monospace" fill="#475569">tools/call</text>
+
+  <!-- IntentGate Gateway (the center) — height bumped 115->130 so the
+       dashed provenance check box (taller than its siblings) has at
+       least 12px clearance above the gateway container's bottom border. -->
+  <rect x="400" y="135" width="380" height="130" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="590" y="158" text-anchor="middle" font-size="14" font-weight="700" fill="#064e3b">IntentGate Gateway</text>
+  <text x="590" y="174" text-anchor="middle" font-size="10" fill="#047857">single binary, per tenant</text>
+
+  <!-- Five-check sequence inside the gateway -->
+  <line x1="418" y1="184" x2="762" y2="184" stroke="#a7f3d0" stroke-width="1"/>
+
+  <!-- Check 1: capability -->
+  <rect x="418" y="194" width="64" height="48" rx="4" fill="#ffffff" stroke="#10b981" stroke-width="1"/>
+  <text x="450" y="212" text-anchor="middle" font-size="9" font-weight="600" fill="#064e3b">capability</text>
+  <text x="450" y="226" text-anchor="middle" font-size="8" fill="#047857">HMAC token</text>
+
+  <!-- Check 2: intent -->
+  <rect x="486" y="194" width="54" height="48" rx="4" fill="#ffffff" stroke="#10b981" stroke-width="1"/>
+  <text x="513" y="212" text-anchor="middle" font-size="9" font-weight="600" fill="#064e3b">intent</text>
+  <text x="513" y="226" text-anchor="middle" font-size="8" fill="#047857">extractor</text>
+
+  <!-- Check 3: PROVENANCE (dashed - opt-in) - taller box -->
+  <rect x="544" y="188" width="70" height="60" rx="4" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <text x="579" y="204" text-anchor="middle" font-size="9" font-weight="700" fill="#7f1d1d">provenance</text>
+  <text x="579" y="218" text-anchor="middle" font-size="8" font-weight="600" fill="#b91c1c">opt-in</text>
+  <text x="579" y="232" text-anchor="middle" font-size="8" font-style="italic" fill="#991b1b">default off</text>
+
+  <!-- Check 4: policy -->
+  <rect x="618" y="194" width="56" height="48" rx="4" fill="#ffffff" stroke="#10b981" stroke-width="1"/>
+  <text x="646" y="212" text-anchor="middle" font-size="9" font-weight="600" fill="#064e3b">policy</text>
+  <text x="646" y="226" text-anchor="middle" font-size="8" fill="#047857">Rego (OPA)</text>
+
+  <!-- Check 5: budget -->
+  <rect x="678" y="194" width="60" height="48" rx="4" fill="#ffffff" stroke="#10b981" stroke-width="1"/>
+  <text x="708" y="212" text-anchor="middle" font-size="9" font-weight="600" fill="#064e3b">budget</text>
+  <text x="708" y="226" text-anchor="middle" font-size="8" fill="#047857">per-token cap</text>
+
+  <!-- Tiny arrows between checks -->
+  <line x1="482" y1="218" x2="486" y2="218" stroke="#10b981" stroke-width="1"/>
+  <line x1="540" y1="218" x2="544" y2="218" stroke="#10b981" stroke-width="1"/>
+  <line x1="614" y1="218" x2="618" y2="218" stroke="#10b981" stroke-width="1"/>
+  <line x1="674" y1="218" x2="678" y2="218" stroke="#10b981" stroke-width="1"/>
+
+  <!-- arrow out to tool servers -->
+  <line x1="785" y1="195" x2="825" y2="195" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="805" y="186" text-anchor="middle" font-size="9" fill="#475569">if pass</text>
+
+  <!-- Tool servers -->
+  <rect x="830" y="155" width="100" height="70" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="880" y="180" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">Tool servers</text>
+  <text x="880" y="196" text-anchor="middle" font-size="10" fill="#64748b">APIs · MCP ·</text>
+  <text x="880" y="210" text-anchor="middle" font-size="10" fill="#64748b">internal services</text>
+
+  <!-- Caption under gateway -->
+  <text x="590" y="285" text-anchor="middle" font-size="10" fill="#065f46" font-style="italic">five sequential checks · one structured audit event per decision · typed JSON-RPC error per failure mode</text>
+
+  <!-- ============== OPERATOR PATH ============== -->
+  <line x1="40" y1="305" x2="920" y2="305" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="50" y="331" font-size="11" font-weight="700" fill="#0369a1" letter-spacing="1.5">OPERATOR PATH (DASHED — OUT-OF-BAND)</text>
+
+  <!-- Identity Provider -->
+  <rect x="40" y="360" width="150" height="64" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="115" y="385" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">Identity Provider</text>
+  <text x="115" y="403" text-anchor="middle" font-size="10" fill="#64748b">Okta · Entra · Auth0</text>
+  <text x="115" y="417" text-anchor="middle" font-size="10" fill="#64748b">OIDC discovery</text>
+
+  <line x1="195" y1="392" x2="235" y2="392" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="215" y="383" text-anchor="middle" font-size="9" fill="#475569">sign-in</text>
+
+  <!-- Console -->
+  <rect x="240" y="360" width="170" height="64" rx="6" fill="#fefce8" stroke="#ca8a04" stroke-width="1.5"/>
+  <text x="325" y="385" text-anchor="middle" font-size="12" font-weight="600" fill="#713f12">Console</text>
+  <text x="325" y="402" text-anchor="middle" font-size="10" fill="#854d0e">operator UI (OSS / Pro)</text>
+  <text x="325" y="416" text-anchor="middle" font-size="10" fill="#854d0e">token + policy + audit views</text>
+
+  <!-- two-way arrow from console to gateway -->
+  <line x1="415" y1="392" x2="465" y2="392" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <text x="440" y="383" text-anchor="middle" font-size="9" fill="#475569">admin API</text>
+
+  <!-- Gateway echo box (smaller, just to show it's the same gateway) -->
+  <rect x="470" y="360" width="100" height="64" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="520" y="385" text-anchor="middle" font-size="11" font-weight="600" fill="#064e3b">Gateway</text>
+  <text x="520" y="402" text-anchor="middle" font-size="9" font-style="italic" fill="#047857">(same one</text>
+  <text x="520" y="414" text-anchor="middle" font-size="9" font-style="italic" fill="#047857">as above)</text>
+
+  <!-- arrow down from gateway to approver -->
+  <line x1="520" y1="425" x2="520" y2="450" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="568" y="442" text-anchor="middle" font-size="9" fill="#475569">if escalate</text>
+
+  <!-- Human approver -->
+  <rect x="380" y="455" width="280" height="60" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="520" y="479" text-anchor="middle" font-size="12" font-weight="600" fill="#0f172a">Human approver</text>
+  <text x="520" y="497" text-anchor="middle" font-size="10" fill="#64748b">SOC operator · approvals queue · TOTP step-up</text>
+
+  <!-- ============== AUDIT PATH ============== -->
+  <text x="640" y="331" font-size="11" font-weight="700" fill="#0369a1" letter-spacing="1.5">AUDIT PATH</text>
+
+  <!-- Gateway echo (right side) -->
+  <rect x="620" y="360" width="90" height="64" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="665" y="384" text-anchor="middle" font-size="11" font-weight="600" fill="#064e3b">Gateway</text>
+  <text x="665" y="402" text-anchor="middle" font-size="9" font-style="italic" fill="#047857">(same one</text>
+  <text x="665" y="414" text-anchor="middle" font-size="9" font-style="italic" fill="#047857">as above)</text>
+
+  <!-- thick arrow → Postgres (synchronous, in-transaction) -->
+  <line x1="715" y1="392" x2="760" y2="392" stroke="#475569" stroke-width="2.5" marker-end="url(#arrowDark)"/>
+  <text x="738" y="383" text-anchor="middle" font-size="9" font-weight="600" fill="#1e293b">in-tx</text>
+
+  <!-- Postgres -->
+  <rect x="765" y="360" width="100" height="64" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="815" y="384" text-anchor="middle" font-size="11" font-weight="600" fill="#0f172a">Postgres</text>
+  <text x="815" y="400" text-anchor="middle" font-size="9" fill="#64748b">SHA-256 hash</text>
+  <text x="815" y="413" text-anchor="middle" font-size="9" fill="#64748b">chain per tenant</text>
+
+  <!-- arrow → SIEM (dashed, streaming export) -->
+  <line x1="815" y1="430" x2="815" y2="460" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+  <text x="860" y="448" text-anchor="middle" font-size="9" fill="#475569">streaming export</text>
+
+  <!-- SIEM -->
+  <rect x="745" y="465" width="140" height="50" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="815" y="486" text-anchor="middle" font-size="11" font-weight="600" fill="#0f172a">SIEM</text>
+  <text x="815" y="502" text-anchor="middle" font-size="9" fill="#64748b">Splunk · Datadog · Sentinel</text>
+
+  <!-- ============== FOOTER NOTES ============== -->
+  <line x1="40" y1="555" x2="920" y2="555" stroke="#e2e8f0" stroke-width="1"/>
+
+  <text x="50" y="580" font-size="10" font-weight="700" fill="#0f172a">Trust boundaries:</text>
+  <text x="50" y="596" font-size="10" fill="#334155">
+    (1) capability tokens are the agent-to-gateway boundary  ·
+    (2) HMAC-signed admin API is the console-to-gateway boundary  ·
+    (3) Postgres ACLs are the audit-write boundary
+  </text>
+  <text x="50" y="616" font-size="10" fill="#334155">
+    Production-mode HMAC signing of all admin/operator endpoints. Hash-chain verifier refuses to advance past a tampered row. Memory provenance dashed because opt-in (default off).
+  </text>
+
+  <!-- Marker definitions -->
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowDark" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+</svg>
