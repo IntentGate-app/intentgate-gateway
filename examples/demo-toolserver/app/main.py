@@ -9,11 +9,19 @@ project ended at "the gateway authorized this call, trust me bro."
 With this upstream wired in, the demos now show authorization +
 actual tool results, end-to-end.
 
-Three mock tools, picked because they map cleanly to the existing
+Four mock tools, picked because they map cleanly to the existing
 pitch scenarios:
 
   - read_invoice(id)         — basic read, used in most verify scripts
-  - list_customers(limit)    — bulk read, useful for data-exfiltration policy demos
+  - list_customers(limit)    — bulk read, returns PII-free customer profiles
+  - read_customer(id|all)    — single-record read by id, or a deliberate
+                               PII-bearing bulk pull when all=true. The
+                               all=true branch is the LLM06 attack target:
+                               policy denies it with a clear reason so the
+                               lab card can demonstrate "bulk PII pull
+                               blocked by policy" with a real deny code
+                               rather than the historical -32601 "unknown
+                               tool" workaround.
   - transfer_funds(...)      — high-risk write, the standard "escalate when
                                amount_eur > 5000" demo target
 
@@ -87,6 +95,31 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "read_customer",
+        "description": (
+            "Read a single customer record by id, including PII-bearing "
+            "fields (national-ID equivalent, email, phone). The bulk "
+            "branch (all=true) is intentionally PII-heavy and exists so "
+            "the demo policy can hard-deny it as a bulk PII pull — "
+            "supplying a specific id is the only policy-correct shape."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Customer id."},
+                "all": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, return the full customer table including "
+                        "PII. Intended as a footgun the policy layer denies."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "transfer_funds",
         "description": (
             "Move money from one account to another. The demo policy "
@@ -136,6 +169,52 @@ CUSTOMER_FIXTURES: list[dict[str, Any]] = [
     {"id": "CUST-4", "name": "Massive Dynamic", "country": "GB", "tier": "enterprise"},
 ]
 
+# PII-bearing customer records. Used ONLY by read_customer — deliberately
+# kept separate from the PII-free CUSTOMER_FIXTURES (which list_customers
+# uses) so the data-classification boundary is visible in the code. The
+# national_id values are obviously synthetic but shaped to look like real
+# identifiers (BSN-style for NL, INSEE for FR, SSN for US, NINO for GB)
+# so the LLM06 demo's "dump all SSNs" framing has something concrete to
+# point at when the policy layer blocks.
+CUSTOMER_PII_FIXTURES: list[dict[str, Any]] = [
+    {
+        "id": "CUST-1",
+        "name": "Initech BV",
+        "country": "NL",
+        "tier": "enterprise",
+        "national_id": "BSN-123456782",
+        "email": "ap@initech.example",
+        "phone": "+31-30-555-0142",
+    },
+    {
+        "id": "CUST-2",
+        "name": "Hooli SARL",
+        "country": "FR",
+        "tier": "mid-market",
+        "national_id": "INSEE-2730475108912",
+        "email": "compta@hooli.example",
+        "phone": "+33-1-5555-0188",
+    },
+    {
+        "id": "CUST-3",
+        "name": "Pied Piper Inc.",
+        "country": "US",
+        "tier": "startup",
+        "national_id": "SSN-123-45-6789",
+        "email": "finance@piedpiper.example",
+        "phone": "+1-415-555-0193",
+    },
+    {
+        "id": "CUST-4",
+        "name": "Massive Dynamic",
+        "country": "GB",
+        "tier": "enterprise",
+        "national_id": "NINO-AB123456C",
+        "email": "accounts@massivedynamic.example",
+        "phone": "+44-20-5555-0177",
+    },
+]
+
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -173,6 +252,49 @@ def tool_list_customers(args: dict[str, Any]) -> dict[str, Any]:
     return {"customers": CUSTOMER_FIXTURES[:limit], "total": len(CUSTOMER_FIXTURES)}
 
 
+def tool_read_customer(args: dict[str, Any]) -> dict[str, Any]:
+    """Return a single PII-bearing customer record by id, or — if
+    all=true — the full PII table.
+
+    The all=true branch exists so the LLM06 lab card has a concrete
+    deny target: bulk PII pulls are denied by the baseline policy, and
+    we want the gateway's deny code (not -32601 "unknown tool") to be
+    what stops the call. In production a tool exposing both shapes
+    would be a footgun; the lab keeps it deliberately so the demo can
+    show the policy layer doing real work."""
+    if bool(args.get("all", False)):
+        # This branch should be unreachable when the baseline policy is
+        # loaded — included so a misconfigured deployment surfaces the
+        # PII clearly rather than silently returning an empty result.
+        return {
+            "customers": CUSTOMER_PII_FIXTURES,
+            "total": len(CUSTOMER_PII_FIXTURES),
+            "_warning": (
+                "bulk PII pull executed — policy layer failed to deny. "
+                "Check baseline.rego is loaded and the read_customer "
+                "rule is present."
+            ),
+        }
+    customer_id = str(args.get("id", "")).strip()
+    if not customer_id:
+        raise ValueError("id is required when all=true is not set")
+    match = next(
+        (c for c in CUSTOMER_PII_FIXTURES if c["id"] == customer_id),
+        None,
+    )
+    if match is None:
+        # Synthetic fallback, mirrors read_invoice. PII-free because
+        # synthetic — no leak in this branch even if reached unexpectedly.
+        return {
+            "id": customer_id,
+            "name": "Synthetic Customer",
+            "country": "NL",
+            "tier": "unknown",
+            "_note": "synthetic record (id not in fixture map)",
+        }
+    return match
+
+
 def tool_transfer_funds(args: dict[str, Any]) -> dict[str, Any]:
     """Return a 'would-transfer' acknowledgement. The DEMO doesn't
     move real money — this is a deliberately stubbed return so the
@@ -202,6 +324,7 @@ def tool_transfer_funds(args: dict[str, Any]) -> dict[str, Any]:
 TOOL_DISPATCH = {
     "read_invoice": tool_read_invoice,
     "list_customers": tool_list_customers,
+    "read_customer": tool_read_customer,
     "transfer_funds": tool_transfer_funds,
 }
 
