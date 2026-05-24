@@ -29,6 +29,24 @@ console, multi-tenant control plane, advanced audit service, and
 fine-tuned intent extractor are commercial products in separate, private
 repositories.
 
+## Architecture
+
+![IntentGate runtime topology: the gateway sits between an AI agent and the tool servers, with identity provider, operator console, hash-chained Postgres audit log, SIEM, and human approver as supporting services around it. Memory provenance is shown dashed because it's opt-in and default off.](./docs/diagrams/intentgate-topology.svg)
+
+The **request hot path** (solid arrows) runs end user → agent → gateway → tool servers. The gateway authorizes each individual tool call through five sequential checks. Memory provenance is the fifth, opt-in via `INTENTGATE_PROVENANCE_ENABLED=true`; it sits between intent and policy in the pipeline.
+
+The **operator path** (dashed arrows) is out-of-band from the request hot path. Your identity provider signs operators into the console via OIDC. The console drives the admin API on the gateway. Escalations from the policy check pause for a human approver with TOTP step-up.
+
+The **audit path** (thick arrow) writes one structured event per decision into a per-tenant SHA-256 hash chain in Postgres, synchronously, in-transaction. Streaming exporters fan out to your SIEM (Splunk, Datadog, Sentinel) via OCSF-lite JSON.
+
+### Request pipeline detail
+
+![IntentGate request pipeline: five sequential checks (capability, intent, memory provenance opt-in, policy, budget). Each has a typed JSON-RPC failure code; Policy alone can escalate to a human approver.](./docs/diagrams/intentgate-pipeline.svg)
+
+Five independent failure modes mapped to five typed JSON-RPC error codes (`-32010` through `-32014`) downstream consumers can branch on. Each check defends against a different class of agent failure: stolen credentials, prompt injection, memory poisoning (AAI03, opt-in), over-broad permissions, runaway loops. The dashed Memory provenance node is opt-in; when disabled, it is a transparent pass-through and the pipeline behaves as the documented four-check version.
+
+The mermaid version of these diagrams in [`docs/README.md`](./docs/README.md) is the editable source; the SVGs above are the polished version. They describe the same architecture.
+
 ## Companion repositories
 
 | Repo | Purpose |
