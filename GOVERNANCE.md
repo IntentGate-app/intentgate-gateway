@@ -1,6 +1,6 @@
 # IntentGate Governance
 
-This document captures NetGnarus's commitment to the IntentGate open-source community: what stays Apache 2.0 in perpetuity, what's reserved for the commercial Pro tier, and the principle that decides which side new features land on. It exists so contributors, customers, and prospective customers can verify what they're depending on before they invest in it.
+This document captures IntentGate B.V.'s commitment to the IntentGate open-source community: what stays Apache 2.0 in perpetuity, what's reserved for the commercial Pro tier, and the principle that decides which side new features land on. It exists so contributors, customers, and prospective customers can verify what they're depending on before they invest in it.
 
 ## The principle
 
@@ -8,11 +8,11 @@ This document captures NetGnarus's commitment to the IntentGate open-source comm
 
 Restated: any organization should be able to run IntentGate as a security control in their environment using the open-source components alone. The Pro tier exists for organizations that need an *enterprise operator console* — multiple operator roles, single sign-on, lifecycle management, polished workflows on top of the same authorization core.
 
-Every new feature decision NetGnarus makes is run against this principle. If a small deployment can't operate without the feature, it ships as Apache 2.0. If it's an operator-experience layer on top, it ships as Pro.
+Every new feature decision IntentGate B.V. makes is run against this principle. If a small deployment can't operate without the feature, it ships as Apache 2.0. If it's an operator-experience layer on top, it ships as Pro.
 
 ## What stays Apache 2.0, forever
 
-The components listed below remain Apache 2.0 in perpetuity. NetGnarus will not relicense them, will not restrict their use, will not change their license to BSL, SSPL, AGPL, or any non-permissive form. This commitment is permanent.
+The components listed below remain Apache 2.0 in perpetuity. IntentGate B.V. will not relicense them, will not restrict their use, will not change their license to BSL, SSPL, AGPL, or any non-permissive form. This commitment is permanent.
 
 | Repository | What it provides |
 | --- | --- |
@@ -43,17 +43,17 @@ These features add *how operators run the gateway day-to-day at enterprise scale
 
 ## The rule that will never be broken
 
-NetGnarus commits that:
+IntentGate B.V. commits that:
 
 1. **No feature currently in the Apache 2.0 components will ever move to the commercial tier.** The current OSS feature surface is the floor, not the ceiling.
 2. **The Apache 2.0 components will not be relicensed.** No BSL, SSPL, AGPL, source-available, or any other non-permissive license will ever apply to the repositories listed above.
-3. **New features will be categorized against the principle, not commercial pressure.** If a security control fits the principle's OSS criterion, it ships Apache 2.0 even if NetGnarus could plausibly monetize it.
+3. **New features will be categorized against the principle, not commercial pressure.** If a security control fits the principle's OSS criterion, it ships Apache 2.0 even if IntentGate B.V. could plausibly monetize it.
 
-If NetGnarus ever fails to honor these commitments, the community is entitled to fork the existing Apache 2.0 codebase under its existing license and continue development independently. The Apache 2.0 license guarantees this in writing; this document acknowledges it as an explicit expectation.
+If IntentGate B.V. ever fails to honor these commitments, the community is entitled to fork the existing Apache 2.0 codebase under its existing license and continue development independently. The Apache 2.0 license guarantees this in writing; this document acknowledges it as an explicit expectation.
 
 ## Decision making
 
-Day-to-day product decisions (roadmap, feature prioritization, release timing) sit with NetGnarus. The OSS / Pro categorization is constrained by the principle above and is not a unilateral discretionary call.
+Day-to-day product decisions (roadmap, feature prioritization, release timing) sit with IntentGate B.V.. The OSS / Pro categorization is constrained by the principle above and is not a unilateral discretionary call.
 
 Contributors influence direction through:
 
@@ -65,13 +65,13 @@ Material changes to this document — to the principle, to the OSS / Pro split, 
 
 ## Trademark
 
-"IntentGate" is a trademark application by NetGnarus (filings in progress in the EU). The trademark exists to protect users and customers from confusing forks or imitations; it does not restrict the use of the Apache 2.0 code itself.
+"IntentGate" is a trademark application by IntentGate B.V. (filings in progress in the EU). The trademark exists to protect users and customers from confusing forks or imitations; it does not restrict the use of the Apache 2.0 code itself.
 
-Use of the IntentGate name in forks, derivative products, or commercial offerings should follow NetGnarus's trademark policy (to be published alongside the trademark registration). Forking the code under Apache 2.0 is unconditionally permitted; naming a fork "IntentGate Plus" or similar requires permission.
+Use of the IntentGate name in forks, derivative products, or commercial offerings should follow IntentGate B.V.'s trademark policy (to be published alongside the trademark registration). Forking the code under Apache 2.0 is unconditionally permitted; naming a fork "IntentGate Plus" or similar requires permission.
 
 ## Security disclosure
 
-Coordinated vulnerability disclosure: `security@netgnarus.com`. PGP fingerprint published with the documentation site. Embargo policy: 90 days from confirmed receipt or earlier if a patch is available and customer-deployed.
+Coordinated vulnerability disclosure: `security@intentgate.app`. PGP fingerprint published with the documentation site. Embargo policy: 90 days from confirmed receipt or earlier if a patch is available and customer-deployed.
 
 ## Contact
 
@@ -81,4 +81,4 @@ General OSS issues: GitHub issues on the relevant repository.
 
 ---
 
-This document is part of NetGnarus's commitment to open-source-first development of authorization infrastructure for AI agents. Last updated: May 2026.
+This document is part of IntentGate B.V.'s commitment to open-source-first development of authorization infrastructure for AI agents. Last updated: May 2026.
