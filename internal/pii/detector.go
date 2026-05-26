@@ -308,17 +308,23 @@ var (
 )
 
 func builtinPatterns() []Pattern {
-	return []Pattern{
-		{Class: ClassEmail, Regex: emailRe},
-		{Class: ClassPhoneIntl, Regex: phoneRe},
+	// PII-class patterns first (validator-having classes leftmost so
+	// the Detect coalesce step prefers them on equal-range hits).
+	out := []Pattern{
 		{Class: ClassIBAN, Regex: ibanRe, Validate: validIBAN},
 		{Class: ClassBSN, Regex: bsnRe, Validate: validBSN},
 		{Class: ClassCreditCard, Regex: ccRe, Validate: validLuhn},
 		{Class: ClassSSNUS, Regex: ssnUSRe, Validate: validSSN},
+		{Class: ClassEmail, Regex: emailRe},
+		{Class: ClassPhoneIntl, Regex: phoneRe},
 		{Class: ClassVATEU, Regex: vatEURe},
 		{Class: ClassIPv4, Regex: ipv4Re},
 		{Class: ClassIPv6, Regex: ipv6Re},
 	}
+	// Credential-class patterns appended in their own priority order.
+	// See credentials.go::credentialPatterns().
+	out = append(out, credentialPatterns()...)
+	return out
 }
 
 // ---------------------------------------------------------------------

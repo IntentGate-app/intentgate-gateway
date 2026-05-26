@@ -301,7 +301,8 @@ Last payment was on a card ending in 4012 8888 8888 1881.`
 // before the fix, then "BSN-[REDACTED:bsn]" after.
 func TestDetector_CoalesceOverlappingClasses(t *testing.T) {
 	d := NewDetector(nil) // all built-ins
-	matches := d.Detect("national_id: BSN-123456782 trailing")
+	input := "BSN-123456782"
+	matches := d.Detect(input)
 
 	// We expect at most one match covering the 9-digit substring.
 	// (Other built-ins may add unrelated zero-length matches but the
@@ -320,9 +321,10 @@ func TestDetector_CoalesceOverlappingClasses(t *testing.T) {
 	}
 
 	// Redaction should produce a single clean marker, not nested ones.
-	out, counts := Redact("BSN-123456782", matches)
-	if strings.Contains(out, ":bsn]") && !strings.HasSuffix(out, "[REDACTED:bsn]") {
-		t.Errorf("nested-marker artefact still present: %q", out)
+	// (Same input as Detect — offsets are relative to the string scanned.)
+	out, counts := Redact(input, matches)
+	if !strings.HasSuffix(out, "[REDACTED:bsn]") {
+		t.Errorf("expected clean trailing [REDACTED:bsn] marker, got %q", out)
 	}
 	if counts[ClassBSN] != 1 {
 		t.Errorf("expected BSN count 1, got %d", counts[ClassBSN])

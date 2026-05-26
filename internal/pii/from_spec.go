@@ -103,6 +103,7 @@ func NewFilterFromSpec(spec FilterSpec) (*Filter, error) {
 // allocation cost is irrelevant on a request-hot-path.
 func knownClasses() map[Class]bool {
 	return map[Class]bool{
+		// PII classes
 		ClassEmail:      true,
 		ClassPhoneIntl:  true,
 		ClassIBAN:       true,
@@ -112,5 +113,18 @@ func knownClasses() map[Class]bool {
 		ClassVATEU:      true,
 		ClassIPv4:       true,
 		ClassIPv6:       true,
+		// Credential classes (RIP Week 2). Same engine, same actions —
+		// policy authors enable them by name in the patterns list just
+		// like PII classes. Defaults to block-by-default are encoded in
+		// the policy / static config, not here; this map only answers
+		// "is this a recognised built-in class?".
+		ClassAWSAccessKey:      true,
+		ClassAWSSecretKey:      true,
+		ClassGitHubPAT:         true,
+		ClassJWT:               true,
+		ClassOAuthBearer:       true,
+		ClassSSHPrivateKey:     true,
+		ClassGCPServiceAccount: true,
+		ClassGenericAPIKey:     true,
 	}
 }
