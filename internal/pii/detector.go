@@ -149,27 +149,80 @@ func (d *Detector) AddCustomPattern(class Class, pattern string) error {
 // The matched substring is included so the caller can perform
 // redaction; the caller MUST NOT persist these values.
 //
-// Overlapping matches are not de-duplicated — if a string matches
-// two patterns, both are returned. Callers performing redaction
-// should redact in reverse order to keep offsets valid.
+// Overlapping matches are coalesced: when two matches cover the same
+// (or nested) byte range, the higher-priority class wins. Priority
+// is "pattern with a validator > pattern without a validator"
+// (a validator-having class like BSN with mod-11 elf-proef is more
+// specific than a generic regex like phone_intl that happens to
+// match 9 digits). Ties — same validator-having-ness — break in
+// pattern-registration order. This prevents the cosmetic artifact
+// where Redact interleaves multiple markers over the same digits.
 func (d *Detector) Detect(input string) []Match {
-	var matches []Match
-	for _, p := range d.patterns {
+	type rawMatch struct {
+		Match
+		hasValidator bool
+		patternIdx   int
+	}
+	var raw []rawMatch
+	for i, p := range d.patterns {
 		idx := p.Regex.FindAllStringIndex(input, -1)
 		for _, span := range idx {
 			val := input[span[0]:span[1]]
 			if p.Validate != nil && !p.Validate(val) {
 				continue
 			}
-			matches = append(matches, Match{
-				Class:  p.Class,
-				Value:  val,
-				Offset: span[0],
-				End:    span[1],
+			raw = append(raw, rawMatch{
+				Match: Match{
+					Class:  p.Class,
+					Value:  val,
+					Offset: span[0],
+					End:    span[1],
+				},
+				hasValidator: p.Validate != nil,
+				patternIdx:   i,
 			})
 		}
 	}
-	sortByOffset(matches)
+
+	// Sort by offset ascending; within the same range, validator-having
+	// classes first; then earlier-registered pattern. This ordering
+	// makes the coalesce loop O(n) and deterministic.
+	for i := 0; i < len(raw); i++ {
+		for j := i + 1; j < len(raw); j++ {
+			a, b := raw[i], raw[j]
+			swap := false
+			if a.Offset != b.Offset {
+				swap = a.Offset > b.Offset
+			} else if a.End != b.End {
+				swap = a.End < b.End // longer first
+			} else if a.hasValidator != b.hasValidator {
+				swap = !a.hasValidator
+			} else {
+				swap = a.patternIdx > b.patternIdx
+			}
+			if swap {
+				raw[i], raw[j] = raw[j], raw[i]
+			}
+		}
+	}
+
+	// Coalesce: drop matches that are contained within (or identical
+	// to) an already-kept match. "Contained" means the byte range is
+	// a subset; with the sort above the kept match is always seen
+	// first, so we just track the rightmost kept End and skip any
+	// match whose End is <= that.
+	var matches []Match
+	keptEnd := -1
+	for _, m := range raw {
+		if m.Offset < keptEnd && m.End <= keptEnd {
+			// Fully contained in a higher-priority kept match.
+			continue
+		}
+		matches = append(matches, m.Match)
+		if m.End > keptEnd {
+			keptEnd = m.End
+		}
+	}
 	return matches
 }
 

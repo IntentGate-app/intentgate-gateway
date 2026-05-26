@@ -292,3 +292,42 @@ Last payment was on a card ending in 4012 8888 8888 1881.`
 	}
 	t.Logf("Realistic redaction counts: %v", counts)
 }
+
+// TestDetector_CoalesceOverlappingClasses verifies that when two
+// regex classes match the same byte range (e.g. 9-digit BSN that
+// also matches a generic phone_intl regex), the higher-priority
+// class wins and only one match is returned. Lab production verified
+// this bug: redacting "BSN-123456782" produced "BSN-[REDACTED:phone_intl]:bsn]"
+// before the fix, then "BSN-[REDACTED:bsn]" after.
+func TestDetector_CoalesceOverlappingClasses(t *testing.T) {
+	d := NewDetector(nil) // all built-ins
+	matches := d.Detect("national_id: BSN-123456782 trailing")
+
+	// We expect at most one match covering the 9-digit substring.
+	// (Other built-ins may add unrelated zero-length matches but the
+	// 123456782 span itself should produce exactly one Match.)
+	var nineDigit []Match
+	for _, m := range matches {
+		if m.Value == "123456782" {
+			nineDigit = append(nineDigit, m)
+		}
+	}
+	if len(nineDigit) != 1 {
+		t.Fatalf("expected 1 match for '123456782', got %d: %+v", len(nineDigit), nineDigit)
+	}
+	if nineDigit[0].Class != ClassBSN {
+		t.Errorf("expected BSN class (validator-having) to win, got %s", nineDigit[0].Class)
+	}
+
+	// Redaction should produce a single clean marker, not nested ones.
+	out, counts := Redact("BSN-123456782", matches)
+	if strings.Contains(out, ":bsn]") && !strings.HasSuffix(out, "[REDACTED:bsn]") {
+		t.Errorf("nested-marker artefact still present: %q", out)
+	}
+	if counts[ClassBSN] != 1 {
+		t.Errorf("expected BSN count 1, got %d", counts[ClassBSN])
+	}
+	if counts[ClassPhoneIntl] != 0 {
+		t.Errorf("phone_intl should be coalesced away on BSN range, got count %d", counts[ClassPhoneIntl])
+	}
+}
