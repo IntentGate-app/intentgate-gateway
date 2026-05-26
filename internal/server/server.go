@@ -14,6 +14,7 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
 	"github.com/NetGnarus/intentgate-gateway/internal/handlers"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/policystore"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
@@ -120,6 +121,15 @@ type Config struct {
 	// gateway runs as the documented four-check pipeline unchanged
 	// when false. See internal/provenance and the design doc.
 	ProvenanceEnabled bool
+	// PIIFilter is the optional LLM02 PII output filter, applied
+	// bidirectionally — both to outbound tool-call arguments
+	// (Check 6 request-side) and to inbound tool-call responses
+	// (Check 6 response-side). nil disables both directions; the
+	// gateway runs as the documented five-check pipeline unchanged
+	// when nil. Constructed at startup from INTENTGATE_PII_FILTER_*
+	// env vars; cmd/gateway/main.go wires it. See internal/pii and
+	// gateway/docs/06-pii-filter.md.
+	PIIFilter *pii.Filter
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -182,6 +192,7 @@ func New(cfg Config) *http.Server {
 		ApprovalTimeout:   cfg.ApprovalTimeout,
 		ArgRedaction:      cfg.ArgRedaction,
 		ProvenanceEnabled: cfg.ProvenanceEnabled,
+		PIIFilter:         cfg.PIIFilter,
 	}))
 
 	// Prometheus scrape endpoint. Behind a flag because exposing

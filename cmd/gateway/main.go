@@ -141,6 +141,7 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/capability"
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/policystore"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
@@ -178,6 +179,19 @@ func main() {
 	// key derived from the capability token's jti. See
 	// internal/provenance and memos/aai03-memory-provenance-design.md.
 	provenanceEnabled := envOr("INTENTGATE_PROVENANCE_ENABLED", "") == "true"
+	// Opt-in LLM02 (Sensitive Information Disclosure) defense. Off by
+	// default — the gateway forwards tool-call requests and responses
+	// without content inspection. When set to "true", the PII filter
+	// runs on Check 6 in both directions:
+	//   - Outbound: tool-call arguments scanned for PII before forwarding
+	//     to the upstream (redacts or blocks per configuration).
+	//   - Inbound: upstream tool-call responses scanned for PII before
+	//     the agent receives bytes (redacts or blocks per configuration).
+	// See internal/pii and gateway/docs/06-pii-filter.md.
+	piiFilterEnabled := envOr("INTENTGATE_PII_FILTER_ENABLED", "") == "true"
+	piiDefaultActionRaw := envOr("INTENTGATE_PII_DEFAULT_ACTION", "redact")
+	piiPatternsRaw := envOr("INTENTGATE_PII_PATTERNS", "")
+	piiPerPatternActionRaw := envOr("INTENTGATE_PII_PER_PATTERN_ACTION", "")
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -235,6 +249,33 @@ func main() {
 	if extractorURL != "" {
 		extractorClient = extractor.New(extractorURL, 1024)
 		logger.Info("intent extractor configured", "url", extractorURL)
+	}
+
+	// LLM02 PII output filter (Check 6, bidirectional). Reads from
+	// INTENTGATE_PII_FILTER_ENABLED + a small set of config env vars;
+	// fails-CLOSED on a bad regex (logs error + exits) rather than
+	// silently booting without the filter the operator asked for.
+	var piiFilter *pii.Filter
+	if piiFilterEnabled {
+		f, err := pii.NewFilterFromSpec(pii.FilterSpec{
+			Enabled:          true,
+			Patterns:         splitCSV(piiPatternsRaw),
+			DefaultAction:    piiDefaultActionRaw,
+			PerPatternAction: parseKVList(piiPerPatternActionRaw),
+		})
+		if err != nil {
+			logger.Error("pii filter init failed", "err", err)
+			os.Exit(1)
+		}
+		piiFilter = f
+		logger.Info("pii filter configured",
+			"enabled", true,
+			"patterns", piiPatternsRaw,
+			"default_action", piiDefaultActionRaw,
+			"per_pattern_action", piiPerPatternActionRaw,
+		)
+	} else {
+		logger.Info("pii filter not configured (set INTENTGATE_PII_FILTER_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)
@@ -484,6 +525,7 @@ func main() {
 		ApprovalTimeout:       approvalTimeout,
 		ArgRedaction:          argRedaction,
 		ProvenanceEnabled:     provenanceEnabled,
+		PIIFilter:             piiFilter,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
@@ -605,6 +647,59 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitCSV parses a comma-separated env value into a trimmed string
+// slice. Empty input returns nil. Used by INTENTGATE_PII_PATTERNS and
+// any future env var that takes a list (e.g. URL allowlists).
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// parseKVList parses a comma-separated key:value list into a map.
+// Used by INTENTGATE_PII_PER_PATTERN_ACTION (e.g. "iban:block,credit_card:block").
+// Skips malformed entries silently — same fail-graceful posture as the
+// rest of the config layer; the operator sees nothing applied rather
+// than the binary refusing to boot on a single bad pair.
+func parseKVList(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, kv := range strings.Split(s, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		colon := strings.IndexByte(kv, ':')
+		if colon <= 0 || colon == len(kv)-1 {
+			continue
+		}
+		k := strings.TrimSpace(kv[:colon])
+		v := strings.TrimSpace(kv[colon+1:])
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // loadUpstream constructs the upstream MCP client from environment.
