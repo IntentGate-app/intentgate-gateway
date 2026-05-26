@@ -16,11 +16,14 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/budget"
 	"github.com/NetGnarus/intentgate-gateway/internal/capability"
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
+	"github.com/NetGnarus/intentgate-gateway/internal/faultisolation"
 	"github.com/NetGnarus/intentgate-gateway/internal/mcp"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/outputschema"
 	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
+	"github.com/NetGnarus/intentgate-gateway/internal/tenantscope"
 	"github.com/NetGnarus/intentgate-gateway/internal/upstream"
 )
 
@@ -114,6 +117,30 @@ type MCPHandlerConfig struct {
 	// stage is a no-op. See internal/pii and
 	// memos/llm02-pii-filter-design.md.
 	PIIFilter *pii.Filter
+	// OutputSchemas is the opt-in LLM05 response-schema registry. When
+	// non-nil and a schema is declared for the requested tool, every
+	// successful upstream response is validated against its declared
+	// shape. Violations are either stripped in-place (default) or
+	// block the response entirely (-32016). When nil (the default),
+	// the stage is a no-op. See internal/outputschema and
+	// memos/llm05-output-schema-design.md.
+	OutputSchemas *outputschema.Registry
+	// TenantScope is the opt-in LLM08 per-tenant vector-scope
+	// enforcer. When non-nil and the requested tool is marked
+	// scoped, the gateway verifies the tool-call's tenant filter
+	// argument matches the verified capability token's tenant claim
+	// before forwarding. Cross-tenant queries return -32017. When
+	// nil (the default), the stage is a no-op. See
+	// internal/tenantscope and memos/llm08-tenant-scope-design.md.
+	TenantScope *tenantscope.Enforcer
+	// FaultIsolation is the opt-in AGENT08 per-tool circuit-breaker
+	// + bulkhead. When non-nil, every upstream forward goes through
+	// an Acquire / release gate keyed on tool name; a slow or
+	// failing tool fails-fast for that tool only without cascading
+	// into the rest of the agent's traffic. When nil (the default),
+	// the stage is a no-op. See internal/faultisolation and
+	// memos/agent08-fault-isolation-design.md.
+	FaultIsolation *faultisolation.Isolator
 }
 
 type mcpHandler struct {
@@ -379,6 +406,46 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 		}
 	}
 
+	// LLM08 tenant scope check (request-side). Runs after the request
+	// PII filter so injected values are scanned for PII first. For
+	// tools the operator has declared tenant-scoped, the gateway
+	// verifies the tool-call's tenant filter argument matches the
+	// verified capability token's tenant claim. Mismatched, missing
+	// (when not auto-injectable), or wildcarded filters return
+	// CodeTenantScopeViolation (-32017). Closes the cross-tenant
+	// query path on shared vector / RAG backends.
+	if h.cfg.TenantScope != nil && h.cfg.TenantScope.IsScoped(params.Name) {
+		var tokenTenant string
+		if capResult.token != nil {
+			tokenTenant = capResult.token.Tenant
+		}
+		tsDec := h.cfg.TenantScope.Check(params.Name, tokenTenant, params.Arguments)
+		if tsDec.Violation != "" && !tsDec.Allowed() {
+			h.cfg.Metrics.ObserveCheck("tenant_scope", "block", time.Since(start))
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckTenantScope,
+				fmt.Sprintf("tenant scope %s on tool %q", tsDec.Violation, params.Name),
+				start, 0,
+				withRequiresStepUp(polResult.requiresStepUp))
+			return mcp.NewErrorResponse(req.ID, mcp.CodeTenantScopeViolation,
+				"tenant scope violation",
+				map[string]any{
+					"violation": string(tsDec.Violation),
+					"tool":      params.Name,
+				})
+		}
+		if tsDec.Mutated {
+			h.cfg.Metrics.ObserveCheck("tenant_scope", "redact", time.Since(start))
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionAllow, audit.CheckTenantScope,
+				fmt.Sprintf("tenant scope injected on tool %q", params.Name),
+				start, 0,
+				withRequiresStepUp(polResult.requiresStepUp))
+		} else if tsDec.Violation == "" {
+			h.cfg.Metrics.ObserveCheck("tenant_scope", "allow", time.Since(start))
+		}
+	}
+
 	// Argument values may contain sensitive data — log only the keys.
 	argKeys := make([]string, 0, len(params.Arguments))
 	for k := range params.Arguments {
@@ -462,9 +529,57 @@ func (h *mcpHandler) forwardToUpstream(
 			"failed to encode upstream request", err.Error())
 	}
 
+	// AGENT08 fault-isolation gate. Acquire a per-tool permit before
+	// the forward. Open circuit / full bulkhead returns fail-fast
+	// CodeUpstreamUnavailable (-32018) without ever calling the
+	// upstream. When the isolator is nil, release is a no-op closure
+	// and the call proceeds unchanged.
+	var release func(faultisolation.Outcome)
+	if h.cfg.FaultIsolation != nil {
+		var fiErr error
+		release, fiErr = h.cfg.FaultIsolation.Acquire(ctx, params.Name)
+		if fiErr != nil {
+			reason := "circuit_open"
+			if errors.Is(fiErr, faultisolation.ErrBulkheadFull) {
+				reason = "bulkhead_full"
+			}
+			h.cfg.Logger.Warn("upstream forward refused (fault isolation)",
+				"tool", params.Name,
+				"agent", cap.agentID,
+				"reason", reason,
+			)
+			h.cfg.Metrics.ObserveCheck("fault_isolation", "block", time.Since(start))
+			h.emitAudit(ctx, r, params, cap, intent,
+				audit.DecisionBlock, audit.CheckFaultIsolation,
+				"upstream forward refused: "+reason, start, 0,
+				withRequiresStepUp(requiresStepUp))
+			return mcp.NewErrorResponse(req.ID, mcp.CodeUpstreamUnavailable,
+				"upstream temporarily unavailable",
+				map[string]any{
+					"reason": reason,
+					"tool":   params.Name,
+				})
+		}
+	}
 	upStart := time.Now()
 	upResp, err := h.cfg.Upstream.Forward(ctx, body)
 	upDur := time.Since(upStart)
+	// Record outcome on the breaker/bulkhead. Status < 500 and no
+	// transport error counts as a success; everything else as a
+	// failure. The breaker doesn't care about JSON-RPC application
+	// errors (e.g. tool says "db unavailable" with a 200 body) —
+	// those are the upstream's correct behaviour and the gateway
+	// has no business opening its breaker for them.
+	if release != nil {
+		switch {
+		case err != nil:
+			release(faultisolation.OutcomeFailure)
+		case upResp != nil && upResp.Status >= 500:
+			release(faultisolation.OutcomeFailure)
+		default:
+			release(faultisolation.OutcomeSuccess)
+		}
+	}
 	if err != nil {
 		var uerr *upstream.Error
 		if errors.As(err, &uerr) {
@@ -582,6 +697,64 @@ func (h *mcpHandler) forwardToUpstream(
 			// No audit row when nothing matched — same noise-discipline
 			// as the provenance check (which is also opt-in and
 			// silent when it has nothing to say).
+		}
+	}
+
+	// LLM05 output schema check — opt-in, per-tool. Runs after the PII
+	// filter (PII redaction may have rewritten string content; the
+	// schema check then verifies the result still matches the declared
+	// shape). Three actions, same vocabulary as PII:
+	//
+	//   - allow  → log violations only, forward unchanged
+	//   - strip  → remove undeclared fields and wrong-type scalars,
+	//              forward the cleaned response (DEFAULT)
+	//   - block  → refuse the response, return -32016 to the caller
+	//
+	// When no schema is declared for this tool, the stage is a no-op.
+	// Schemas are loaded from INTENTGATE_OUTPUT_SCHEMAS_PATH at startup;
+	// per-tool action overrides take precedence over the registry's
+	// default action.
+	if h.cfg.OutputSchemas != nil && parsed.Result != nil {
+		if schema, action, ok := h.cfg.OutputSchemas.Lookup(params.Name); ok {
+			osRes := schema.Validate(parsed.Result)
+			switch {
+			case !osRes.HasViolations():
+				h.cfg.Metrics.ObserveCheck("output_schema", "allow", time.Since(start))
+				// No audit row on a clean response — same discipline as
+				// PII and provenance.
+
+			case action == outputschema.ActionBlock:
+				h.cfg.Metrics.ObserveCheck("output_schema", "block", time.Since(start))
+				h.emitAudit(ctx, r, params, cap, intent,
+					audit.DecisionBlock, audit.CheckOutputSchema,
+					fmt.Sprintf("output schema blocked response (kinds=%v)", osRes.CountsByKind()),
+					start, upResp.Status,
+					withRequiresStepUp(requiresStepUp))
+				return mcp.NewErrorResponse(req.ID, mcp.CodeOutputSchemaViolation,
+					"response blocked by output schema",
+					map[string]any{
+						"counts": osRes.CountsByKind(),
+						"tool":   params.Name,
+					})
+
+			case action == outputschema.ActionStrip:
+				parsed.Result = osRes.Stripped
+				h.cfg.Metrics.ObserveCheck("output_schema", "redact", time.Since(start))
+				h.emitAudit(ctx, r, params, cap, intent,
+					audit.DecisionAllow, audit.CheckOutputSchema,
+					fmt.Sprintf("output schema stripped response (kinds=%v)", osRes.CountsByKind()),
+					start, upResp.Status,
+					withRequiresStepUp(requiresStepUp))
+				// fall through to inject metadata + return the cleaned response
+
+			case action == outputschema.ActionAllow:
+				h.cfg.Metrics.ObserveCheck("output_schema", "allow", time.Since(start))
+				h.emitAudit(ctx, r, params, cap, intent,
+					audit.DecisionAllow, audit.CheckOutputSchema,
+					fmt.Sprintf("output schema violations logged (kinds=%v)", osRes.CountsByKind()),
+					start, upResp.Status,
+					withRequiresStepUp(requiresStepUp))
+			}
 		}
 	}
 

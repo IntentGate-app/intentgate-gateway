@@ -108,6 +108,37 @@ const (
 	// the matched PII values are never returned to the caller or
 	// persisted in the audit chain.
 	CodePIIBlocked = -32015
+	// CodeOutputSchemaViolation is returned when the response-schema
+	// check (LLM05 — see internal/outputschema and the
+	// memos/llm05-output-schema-design.md design doc) rejects an
+	// upstream tool response because it violates the declared schema
+	// (missing required fields, wrong types, undeclared properties,
+	// or enum violations) and the tenant's policy chose action=block.
+	// Opt-in feature; not emitted unless the operator has declared
+	// schemas for the tool. The response's `data` payload carries
+	// per-violation-kind counts only; matched values never leave the
+	// gateway.
+	CodeOutputSchemaViolation = -32016
+	// CodeTenantScopeViolation is returned when the per-tenant
+	// vector-scope check (LLM08 — see internal/tenantscope and the
+	// memos/llm08-tenant-scope-design.md design doc) refuses a tool
+	// call whose tenant filter is missing, wildcarded, or doesn't
+	// match the capability token's tenant claim. Closes the
+	// cross-tenant query path against shared vector / RAG backends.
+	// Opt-in feature; not emitted unless the operator marks specific
+	// tools as tenant-scoped via INTENTGATE_TENANT_SCOPED_TOOLS.
+	CodeTenantScopeViolation = -32017
+	// CodeUpstreamUnavailable is returned when the per-tool fault-
+	// isolation layer (AGENT08 — see internal/faultisolation and the
+	// memos/agent08-fault-isolation-design.md design doc) refuses a
+	// forward because the per-tool circuit breaker is open or the
+	// per-tool bulkhead has no permits available. Fail-fast prevents
+	// one slow / failing tool from cascading into agent-wide
+	// degradation. Opt-in; not emitted unless
+	// INTENTGATE_FAULT_ISOLATION_ENABLED=true. The response's `data`
+	// payload carries the breaker reason ("circuit_open" or
+	// "bulkhead_full") and the tool name; no upstream payload.
+	CodeUpstreamUnavailable = -32018
 )
 
 // NewErrorResponse builds a JSON-RPC 2.0 error response.

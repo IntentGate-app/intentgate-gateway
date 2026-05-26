@@ -12,13 +12,16 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/auditstore"
 	"github.com/NetGnarus/intentgate-gateway/internal/budget"
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
+	"github.com/NetGnarus/intentgate-gateway/internal/faultisolation"
 	"github.com/NetGnarus/intentgate-gateway/internal/handlers"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/outputschema"
 	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/policystore"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
 	"github.com/NetGnarus/intentgate-gateway/internal/siem"
+	"github.com/NetGnarus/intentgate-gateway/internal/tenantscope"
 	"github.com/NetGnarus/intentgate-gateway/internal/upstream"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -130,6 +133,21 @@ type Config struct {
 	// env vars; cmd/gateway/main.go wires it. See internal/pii and
 	// gateway/docs/06-pii-filter.md.
 	PIIFilter *pii.Filter
+	// OutputSchemas is the optional LLM05 per-tool response-schema
+	// registry, applied to inbound upstream tool responses after the
+	// PII filter. nil disables the stage; the gateway behaves
+	// unchanged. Constructed at startup from INTENTGATE_OUTPUT_SCHEMAS_PATH.
+	// See internal/outputschema.
+	OutputSchemas *outputschema.Registry
+	// TenantScope is the optional LLM08 per-tenant vector-scope
+	// enforcer. nil disables the check; the gateway behaves
+	// unchanged. Constructed at startup from INTENTGATE_TENANT_SCOPED_TOOLS.
+	// See internal/tenantscope.
+	TenantScope *tenantscope.Enforcer
+	// FaultIsolation is the optional AGENT08 per-tool circuit-breaker
+	// + bulkhead. nil disables the layer. Constructed at startup
+	// from INTENTGATE_FAULT_ISOLATION_*. See internal/faultisolation.
+	FaultIsolation *faultisolation.Isolator
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -193,6 +211,9 @@ func New(cfg Config) *http.Server {
 		ArgRedaction:      cfg.ArgRedaction,
 		ProvenanceEnabled: cfg.ProvenanceEnabled,
 		PIIFilter:         cfg.PIIFilter,
+		OutputSchemas:     cfg.OutputSchemas,
+		TenantScope:       cfg.TenantScope,
+		FaultIsolation:    cfg.FaultIsolation,
 	}))
 
 	// Prometheus scrape endpoint. Behind a flag because exposing

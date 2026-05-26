@@ -80,6 +80,30 @@ const (
 	// Opt-in feature; only emitted when the tenant has the filter
 	// enabled. See internal/pii and memos/llm02-pii-filter-design.md.
 	CheckPII Check = "pii"
+	// CheckOutputSchema is the response-schema validator (LLM05).
+	// Like CheckPII, it describes the gateway's decision on what the
+	// upstream returned: allow (response matched its declared schema),
+	// strip (undeclared fields/wrong-type scalars removed and the body
+	// forwarded), or block (response refused; agent receives -32016).
+	// Per-violation-kind counts go into the audit row; matched values
+	// never leave the gateway. Opt-in feature; only emitted when the
+	// operator has declared a schema for the tool. See
+	// internal/outputschema and memos/llm05-output-schema-design.md.
+	CheckOutputSchema Check = "output_schema"
+	// CheckTenantScope is the per-tenant vector-scope check (LLM08).
+	// Runs on the request side, after the PII filter, for tools the
+	// operator has declared tenant-scoped. The audit row records the
+	// violation kind (missing|wildcard|mismatch) and the tool, never
+	// the matched filter value. Opt-in feature; only emitted when
+	// the operator has marked specific tools via
+	// INTENTGATE_TENANT_SCOPED_TOOLS. See internal/tenantscope.
+	CheckTenantScope Check = "tenant_scope"
+	// CheckFaultIsolation is the per-tool bulkhead + circuit breaker
+	// check (AGENT08). Only emitted when the layer is enabled AND a
+	// call was refused fail-fast (circuit_open or bulkhead_full).
+	// Healthy calls produce no audit row from this stage — the
+	// downstream upstream check already records every forward.
+	CheckFaultIsolation Check = "fault_isolation"
 )
 
 // Event is the on-the-wire audit record.

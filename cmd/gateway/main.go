@@ -140,13 +140,16 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/budget"
 	"github.com/NetGnarus/intentgate-gateway/internal/capability"
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
+	"github.com/NetGnarus/intentgate-gateway/internal/faultisolation"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/outputschema"
 	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/policystore"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
 	"github.com/NetGnarus/intentgate-gateway/internal/server"
 	"github.com/NetGnarus/intentgate-gateway/internal/siem"
+	"github.com/NetGnarus/intentgate-gateway/internal/tenantscope"
 	"github.com/NetGnarus/intentgate-gateway/internal/upstream"
 	"github.com/NetGnarus/intentgate-gateway/internal/webhook"
 	"github.com/redis/go-redis/v9"
@@ -192,6 +195,23 @@ func main() {
 	piiDefaultActionRaw := envOr("INTENTGATE_PII_DEFAULT_ACTION", "redact")
 	piiPatternsRaw := envOr("INTENTGATE_PII_PATTERNS", "")
 	piiPerPatternActionRaw := envOr("INTENTGATE_PII_PER_PATTERN_ACTION", "")
+	// LLM05 output-schema registry. Reads a per-tool JSON-Schema-subset
+	// config from disk at INTENTGATE_OUTPUT_SCHEMAS_PATH. Empty path =
+	// no schemas declared = the check is a no-op for every tool.
+	outputSchemasPath := envOr("INTENTGATE_OUTPUT_SCHEMAS_PATH", "")
+	outputSchemasDefaultAction := envOr("INTENTGATE_OUTPUT_SCHEMA_DEFAULT_ACTION", "strip")
+	// LLM08 per-tenant vector-scope enforcer. CSV of tool names with
+	// optional :arg_path (e.g. "vector_search:tenant_id,rag_query:filter.tenant_id").
+	// Empty disables the check (no-op).
+	tenantScopeToolsRaw := envOr("INTENTGATE_TENANT_SCOPED_TOOLS", "")
+	tenantScopeDefaultAction := envOr("INTENTGATE_TENANT_SCOPE_DEFAULT_ACTION", "block")
+	// AGENT08 per-tool circuit-breaker + bulkhead. Disabled by default;
+	// once enabled, every upstream forward is gated by a per-tool
+	// semaphore + breaker.
+	faultIsolationEnabled := envOr("INTENTGATE_FAULT_ISOLATION_ENABLED", "") == "true"
+	faultIsolationMaxConcurrentRaw := envOr("INTENTGATE_FAULT_ISOLATION_MAX_CONCURRENT_PER_TOOL", "20")
+	faultIsolationFailureThresholdRaw := envOr("INTENTGATE_FAULT_ISOLATION_FAILURE_THRESHOLD", "5")
+	faultIsolationCooldownMSRaw := envOr("INTENTGATE_FAULT_ISOLATION_COOLDOWN_MS", "30000")
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -276,6 +296,94 @@ func main() {
 		)
 	} else {
 		logger.Info("pii filter not configured (set INTENTGATE_PII_FILTER_ENABLED=true to enable)")
+	}
+
+	// LLM05 output-schema registry. Fail-CLOSED on parse error: if the
+	// operator pointed us at a config they intended to enforce but the
+	// file is malformed, we refuse to boot rather than silently leave
+	// the check off.
+	var outputSchemas *outputschema.Registry
+	if outputSchemasPath != "" {
+		defaultAct, err := outputschema.ParseAction(outputSchemasDefaultAction)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_OUTPUT_SCHEMA_DEFAULT_ACTION", "err", err)
+			os.Exit(1)
+		}
+		raw, err := os.ReadFile(outputSchemasPath)
+		if err != nil {
+			logger.Error("read INTENTGATE_OUTPUT_SCHEMAS_PATH", "path", outputSchemasPath, "err", err)
+			os.Exit(1)
+		}
+		reg := outputschema.NewRegistry(defaultAct)
+		if err := reg.LoadJSON(raw); err != nil {
+			logger.Error("output schema registry load failed", "path", outputSchemasPath, "err", err)
+			os.Exit(1)
+		}
+		outputSchemas = reg
+		logger.Info("output schema registry configured",
+			"path", outputSchemasPath,
+			"tools", reg.ToolNames(),
+			"default_action", defaultAct,
+		)
+	} else {
+		logger.Info("output schema registry not configured (set INTENTGATE_OUTPUT_SCHEMAS_PATH to enable)")
+	}
+
+	// LLM08 tenant scope enforcer. Fail-CLOSED on parse error for the
+	// same reason as the output-schema registry.
+	var tenantScopeEnforcer *tenantscope.Enforcer
+	if tenantScopeToolsRaw != "" {
+		defaultAct, err := tenantscope.ParseAction(tenantScopeDefaultAction)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_TENANT_SCOPE_DEFAULT_ACTION", "err", err)
+			os.Exit(1)
+		}
+		enf := tenantscope.NewEnforcer(defaultAct)
+		if err := enf.LoadFromCSV(tenantScopeToolsRaw); err != nil {
+			logger.Error("tenant scope load failed", "err", err)
+			os.Exit(1)
+		}
+		tenantScopeEnforcer = enf
+		logger.Info("tenant scope enforcer configured",
+			"tools", enf.Tools(),
+			"default_action", defaultAct,
+		)
+	} else {
+		logger.Info("tenant scope enforcer not configured (set INTENTGATE_TENANT_SCOPED_TOOLS to enable)")
+	}
+
+	// AGENT08 fault-isolation isolator. Fail-CLOSED on parse error
+	// (an operator typo on a tuning knob shouldn't silently revert
+	// to wide-open).
+	var faultIsolator *faultisolation.Isolator
+	if faultIsolationEnabled {
+		mc, err := strconv.Atoi(faultIsolationMaxConcurrentRaw)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_FAULT_ISOLATION_MAX_CONCURRENT_PER_TOOL", "err", err)
+			os.Exit(1)
+		}
+		ft, err := strconv.Atoi(faultIsolationFailureThresholdRaw)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_FAULT_ISOLATION_FAILURE_THRESHOLD", "err", err)
+			os.Exit(1)
+		}
+		cd, err := strconv.Atoi(faultIsolationCooldownMSRaw)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_FAULT_ISOLATION_COOLDOWN_MS", "err", err)
+			os.Exit(1)
+		}
+		faultIsolator = faultisolation.New(faultisolation.Config{
+			MaxConcurrentPerTool: mc,
+			FailureThreshold:     ft,
+			Cooldown:             time.Duration(cd) * time.Millisecond,
+		})
+		logger.Info("fault isolation enabled",
+			"max_concurrent_per_tool", mc,
+			"failure_threshold", ft,
+			"cooldown_ms", cd,
+		)
+	} else {
+		logger.Info("fault isolation not configured (set INTENTGATE_FAULT_ISOLATION_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)
@@ -526,6 +634,9 @@ func main() {
 		ArgRedaction:          argRedaction,
 		ProvenanceEnabled:     provenanceEnabled,
 		PIIFilter:             piiFilter,
+		OutputSchemas:         outputSchemas,
+		TenantScope:           tenantScopeEnforcer,
+		FaultIsolation:        faultIsolator,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
