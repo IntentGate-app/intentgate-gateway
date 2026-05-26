@@ -172,6 +172,75 @@ The audit chain is tamper-evident: rows are HMAC-linked to the
 previous row. AAI10 (Audit Tampering — Postgres rewrite) on the lab
 proves the chain catches direct row edits.
 
+## Why not OAuth 2.0?
+
+The most common follow-up. Honest answer: **the agent-to-gateway path
+is deliberately not OAuth.** The human-to-console path **is** OIDC,
+which is OAuth 2.0 plus identity tokens.
+
+**Where OAuth/OIDC IS used:**
+
+- **Operator console login** (Pro). Standard OIDC against the
+  customer's IdP — Okta, Entra ID, Google Workspace, Auth0, Ping,
+  anything OIDC-compliant. Authorization code flow with PKCE. The
+  console runs NextAuth.js with OIDC providers configured.
+- **SCIM provisioning** rides on OAuth 2.0 token auth in most IdP
+  integrations.
+
+**Where OAuth is NOT used — and why:**
+
+- **Agent-to-gateway** uses capability tokens, not OAuth access
+  tokens. Four deliberate reasons:
+  1. **Per-call caveats beat OAuth scopes.** A capability token can
+     carry `max_calls`, `tool_allow`, `agent_lock`, `step_up_at`,
+     time windows, tenant binding — all on the same token, evaluated
+     per request. OAuth scopes are coarser and don't compose this
+     way without custom claim conventions.
+  2. **Attenuation without an authorization server round-trip.** A
+     token holder can derive a strictly narrower child token by
+     appending a caveat and re-HMACing under the parent's signature.
+     OAuth has no equivalent — every narrowed scope requires a new
+     trip to the AS.
+  3. **In-process verification.** No network call to an authorization
+     server on every tool call. Verification is HMAC-SHA256 against
+     the master key, single-digit microseconds. OAuth introspection
+     against an AS adds 10–50ms per call.
+  4. **No /token endpoint to attack.** The OAuth client_credentials
+     and authorization_code endpoints are a regular CVE generator.
+     Capability tokens are minted only via the admin API, which is
+     itself protected by the admin token (or the console's OIDC
+     session). Smaller attack surface.
+
+**How OAuth and IntentGate compose:**
+
+If a customer has invested in an OAuth/OIDC stack and wants to drive
+agent authorization from it, the integration pattern is a **mint
+bridge** — a small service the customer runs that:
+
+1. Receives the agent's OAuth access token (or OIDC ID token) from
+   their existing auth flow.
+2. Validates it against the customer's IdP (introspection,
+   JWKS-verified signature, whichever model they already use).
+3. Maps OAuth scopes / OIDC claims to IntentGate caveats (which
+   tools, which tenant, max_calls, TTL).
+4. Calls `/v1/admin/mint` with the resulting policy to produce a
+   capability token.
+5. Returns the capability token to the agent for use on `/v1/mcp`.
+
+This is a ~100-line service that gives the customer "I keep my
+OAuth IdP as the source of truth, IntentGate handles per-call
+authorization downstream." We can ship a reference implementation
+if a prospect needs one — it's not in the OSS today.
+
+**Summary line for a CISO:**
+
+> *"OIDC for human operator login, capability tokens for agent
+> authorization. The agent path isn't OAuth by design — capability
+> tokens give us per-call caveats, attenuation without a round trip,
+> and in-process verification that OAuth can't match. We bridge to
+> your existing OAuth IdP if that's where your identity source of
+> truth lives."*
+
 ## Standard follow-ups
 
 **Q: What signing algorithm?**
