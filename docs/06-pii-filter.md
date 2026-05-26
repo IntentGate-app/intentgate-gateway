@@ -1,59 +1,95 @@
-# PII Output Filter (LLM02 Defense)
+# PII + Credential Filter (LLM02 Defense, Bidirectional)
 
-**Status:** Shipped 2026-05-26 · Opt-in via `INTENTGATE_PII_FILTER_ENABLED=true`
-**Pipeline position:** Check 6, on the response stream from upstream MCP servers
+**Status:** Bidirectional + credential pack shipped 2026-05-26 · Opt-in via `INTENTGATE_PII_FILTER_ENABLED=true`
+**Pipeline position:** Check 6, runs in **both directions** — outbound on `tools/call` arguments and inbound on `tools/call` responses
 **Audience:** Engineers extending or maintaining the gateway / Rego authors
 
-This doc explains the *implementation* of the PII output filter. For
-the strategic design rationale, see `memos/llm02-pii-filter-design.md`
-in the operator's working tree. For customer-facing claims, see
-Section 1 of `docs/IntentGate-Vendor-Security-Pack.docx`.
+This doc explains the *implementation* of the bidirectional PII +
+credential filter. For the strategic design rationale, see
+`memos/llm02-pii-filter-design.md` (PII output-side, original ship)
+and `memos/response-inspection-pipeline-design.md` (the bidirectional
++ credential extension that landed later the same day). For
+customer-facing claims, see Section 1 of
+`docs/IntentGate-Vendor-Security-Pack.docx`.
 
 ---
 
-## The threat
+## The threats closed
 
-OWASP LLM Top 10 LLM02 — Sensitive Information Disclosure. An upstream
-MCP tool returns a result that contains PII the agent shouldn't see or
-shouldn't forward to its caller: a customer record dump that includes
-emails and IBANs when the user only asked for an order status; a
-support ticket transcript that leaks a third party's phone number; a
-log search that surfaces credit card numbers stored by mistake.
+**OWASP LLM Top 10 LLM02 — Sensitive Information Disclosure.** Two
+distinct breach patterns the gateway now closes symmetrically:
+
+- *Response side.* An upstream MCP tool returns a result that contains
+  PII the agent shouldn't see — a customer record dump that includes
+  emails and IBANs when the user only asked for an order status, a
+  support ticket transcript that leaks a third party's phone number,
+  a log search that surfaces credit cards stored by mistake.
+- *Request side.* An agent that already holds PII in its context (from
+  memory, from a previous tool call, from the user prompt) includes
+  that PII in arguments going *outbound* — e.g. putting a customer's
+  email into a `web_search` query, or an IBAN into a third-party CRM
+  call. Capability + policy gate *which* tool is called; the
+  request-side filter scrubs the *contents* of allowed calls.
+
+**Credential leakage (LLM02 extension).** The same engine catches
+authentication secrets in either direction: AWS access + secret keys,
+GitHub PATs, JWTs, OAuth bearer tokens, SSH private keys, GCP
+service-account JSON, plus a generic API-key heuristic. The default
+action for the most damaging classes (`aws_secret_key`,
+`ssh_private_key`, `gcp_service_account_key`) is `block`; the rest
+redact.
 
 The first five checks (capability, intent, provenance, policy, budget)
-all evaluate the *request*. They can't see what the upstream tool will
-return. The PII filter is the only check that runs *after* the
-upstream response and *before* the agent receives bytes. It is the
-gateway's last opportunity to enforce GDPR Article 5(1)(c)
-(minimisation) and Article 32 (security of processing) on a response
-the upstream server happened to over-share.
+all evaluate the request *shape* — token validity, intent match,
+policy allow, budget remaining. They don't read argument values or
+response bodies. Check 6 is the only check that inspects *content*,
+and it does so in both directions. It is the gateway's enforcement
+point for GDPR Article 5(1)(c) (minimisation), Article 32 (security
+of processing), and outbound-credentialinhibitsion.
 
 ---
 
 ## Runtime architecture
 
-One package (`internal/pii`), three call sites, no new runtime
+One package (`internal/pii`), four call sites, no new runtime
 component:
 
 1. **Startup** — if `INTENTGATE_PII_FILTER_ENABLED=true`, the binary
    constructs a static `pii.Filter` from environment configuration
    (enabled classes, default action, per-pattern overrides, custom
-   patterns) and wires it into `MCPHandlerConfig.PIIFilter`.
+   patterns) and wires it into `MCPHandlerConfig.PIIFilter`. The same
+   Filter is used for both directions; classes can be PII or
+   credential or any mix.
 2. **Per request — Rego** — the policy stage can return a
    `pii_filter` block in its decision. The handler converts that into
    a one-shot `pii.Filter` for this request only and uses it instead
    of the static filter. Three-tier fallback: per-request override →
    static gateway filter → no filter (filter disabled).
-3. **Per request — response** — after the upstream MCP server replies
-   to `tools/call`, `forwardToUpstream` invokes
+3. **Per request — outbound (request-side)** — after the budget check
+   passes and before forwarding to upstream, the handler invokes
+   `filter.ApplyToMCPRequest(params.Arguments)`. The filter walks
+   every string in the arguments tree recursively (maps, slices,
+   nested objects), decides one of four actions, and either forwards
+   the (possibly redacted-in-place) arguments or short-circuits with
+   `-32015` (`CodePIIBlocked`) before the upstream sees the call.
+4. **Per response — inbound (response-side)** — after the upstream
+   MCP server replies to `tools/call`, `forwardToUpstream` invokes
    `filter.ApplyToMCPResult(parsed.Result)`. The filter walks every
    `content[]` text block, decides one of four actions, and either
-   forwards the (possibly redacted) result or short-circuits with
-   JSON-RPC error `-32015` (`CodePIIBlocked`).
+   forwards the (possibly redacted) result or short-circuits with the
+   same `-32015` code before the agent receives bytes.
+
+Audit rows for the two directions carry the same `check: "pii"`
+field; the `direction: "request" | "response"` field on the row
+distinguishes them. Each direction can fire independently, and a
+single tools/call can trigger both — the audit chain will show two
+rows in that case.
 
 The runtime topology is otherwise identical to a non-PII-filter
 deployment — one binary, one capability-token trust boundary, one
-audit chain.
+audit chain. Headline framing: with Check 6 wired bidirectionally,
+the gateway shifted from a *one-way authorisation proxy* to a
+*bidirectional inspection proxy*.
 
 ---
 
