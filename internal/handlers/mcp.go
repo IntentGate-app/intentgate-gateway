@@ -333,6 +333,52 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			"budget check failed", bdgResult.err.Error())
 	}
 
+	// Request-side PII filter (LLM02 bidirectional close).
+	//
+	// Same engine as the response-side filter; scans every string value
+	// in params.Arguments (recursively into nested objects/arrays). On
+	// Redact, argument values are rewritten in place — the agent doesn't
+	// get to recover the original. On Block/Escalate, the call is
+	// refused and the matched values never leave the gateway.
+	//
+	// Audit row carries direction="request" so the chain distinguishes
+	// inbound from outbound matches. Counts only, never values — same
+	// principle the response side already follows.
+	reqFilter := h.requestPIIFilter(polResult.piiOverride, capResult.agentID, params.Name)
+	if reqFilter != nil && len(params.Arguments) > 0 {
+		piiDec := reqFilter.ApplyToMCPRequest(params.Arguments)
+		switch piiDec.Action {
+		case pii.ActionBlock, pii.ActionEscalate:
+			h.cfg.Metrics.ObserveCheck("pii_request", "block", time.Since(start))
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckPII,
+				fmt.Sprintf("pii filter blocked request (classes=%v)", piiDec.MatchedClasses),
+				start, 0,
+				withRequiresStepUp(polResult.requiresStepUp))
+			return mcp.NewErrorResponse(req.ID, mcp.CodePIIBlocked,
+				"request blocked by pii filter",
+				map[string]any{
+					"counts":    piiDec.Counts,
+					"classes":   piiDec.MatchedClasses,
+					"direction": "request",
+				})
+		case pii.ActionRedact:
+			// Arguments mutated in place by ApplyToMCPRequest. Log and
+			// continue to forward. The audit row records what the filter
+			// did so an operator can reconstruct downstream behaviour.
+			h.cfg.Metrics.ObserveCheck("pii_request", "redact", time.Since(start))
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionAllow, audit.CheckPII,
+				fmt.Sprintf("pii filter redacted request (classes=%v)", piiDec.MatchedClasses),
+				start, 0,
+				withRequiresStepUp(polResult.requiresStepUp))
+		case pii.ActionAllow:
+			h.cfg.Metrics.ObserveCheck("pii_request", "allow", time.Since(start))
+			// No audit row on Allow with zero matches — same noise
+			// discipline as the response-side filter.
+		}
+	}
+
 	// Argument values may contain sensitive data — log only the keys.
 	argKeys := make([]string, 0, len(params.Arguments))
 	for k := range params.Arguments {
@@ -1251,6 +1297,34 @@ var (
 type capError string
 
 func (e capError) Error() string { return string(e) }
+
+// requestPIIFilter resolves which pii.Filter to apply to the OUTBOUND
+// request arguments. Three-tier fallback identical to the response-
+// side path: per-request Rego override → static gateway filter → no
+// filter. Returns nil when nothing should run (which also makes the
+// caller a no-op).
+//
+// Building the filter for each request is cheap (the detector caches
+// compiled regexes and the FilterSpec → Filter conversion is a tiny
+// allocation) but worth factoring so the request-side call site stays
+// readable.
+func (h *mcpHandler) requestPIIFilter(override *policy.PIIFilterSpec, agentID, toolName string) *pii.Filter {
+	if override != nil {
+		f, err := pii.NewFilterFromSpec(pii.FilterSpec{
+			Enabled:          override.Enabled,
+			Patterns:         override.Patterns,
+			DefaultAction:    override.DefaultAction,
+			PerPatternAction: override.PerPatternAction,
+			CustomPatterns:   piiOverrideToCustomPatterns(override.CustomPatterns),
+		})
+		if err == nil {
+			return f
+		}
+		h.cfg.Logger.Warn("pii filter override invalid; falling back to static config",
+			"agent", agentID, "tool", toolName, "err", err, "direction", "request")
+	}
+	return h.cfg.PIIFilter
+}
 
 // piiOverrideToCustomPatterns adapts the policy package's
 // PIIFilterCustomPattern shape to the pii package's
