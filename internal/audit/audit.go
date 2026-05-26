@@ -70,6 +70,16 @@ const (
 	CheckPolicy     Check = "policy"
 	CheckBudget     Check = "budget"
 	CheckUpstream   Check = "upstream"
+	// CheckPII is the response-stream PII filter (LLM02). Unlike the
+	// other checks which evaluate the request, CheckPII events
+	// describe the gateway's decision on what the upstream tool
+	// returned: allow (no PII matched), redact (matches replaced with
+	// [REDACTED:<class>] markers and the body forwarded), or block
+	// (response refused; agent receives -32015). The audit row
+	// records counts per PII class — never the matched values.
+	// Opt-in feature; only emitted when the tenant has the filter
+	// enabled. See internal/pii and memos/llm02-pii-filter-design.md.
+	CheckPII Check = "pii"
 )
 
 // Event is the on-the-wire audit record.

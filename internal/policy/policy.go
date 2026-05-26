@@ -86,6 +86,48 @@ type Decision struct {
 	Escalate       bool
 	Reason         string
 	RequiresStepUp bool
+	// PIIFilter is the optional per-request PII output-filter config
+	// (LLM02). Populated from the Rego rule's `pii_filter` field when
+	// the policy author wants to override the gateway's static PII
+	// configuration for this specific call (e.g. allowing PII through
+	// for an account-holder reading their own data). When nil, the
+	// handler uses whatever static filter was configured at startup.
+	// When non-nil, the handler builds a one-shot filter from this
+	// config for this request only.
+	//
+	// See internal/pii and memos/llm02-pii-filter-design.md.
+	PIIFilter *PIIFilterSpec
+}
+
+// PIIFilterSpec is the Rego-supplied PII filter configuration for one
+// request. Fields mirror pii.Config so the handler can convert
+// directly without coupling the policy package to the pii package.
+//
+// Example Rego:
+//
+//	decision := {
+//	    "allow": true,
+//	    "pii_filter": {
+//	        "enabled": true,
+//	        "patterns": ["email", "iban", "bsn"],
+//	        "default_action": "redact",
+//	        "per_pattern_action": {"iban": "block"},
+//	    },
+//	}
+type PIIFilterSpec struct {
+	Enabled          bool
+	Patterns         []string
+	DefaultAction    string
+	PerPatternAction map[string]string
+	CustomPatterns   []PIIFilterCustomPattern
+}
+
+// PIIFilterCustomPattern is one customer-declared additional pattern
+// passed through from Rego. The handler validates the regex (ReDoS
+// guard) when constructing the runtime filter.
+type PIIFilterCustomPattern struct {
+	Class string
+	Regex string
 }
 
 // Engine wraps a prepared Rego query. Construct one at startup with
@@ -149,12 +191,69 @@ func (e *Engine) Evaluate(ctx context.Context, input any) (Decision, error) {
 	// call. The audit event picks it up either way; the Rego rule
 	// chooses whether to also flip Allow to false.
 	requiresStepUp, _ := obj["requires_step_up"].(bool)
+
+	// pii_filter is optional; absent means "use the gateway's static
+	// PII config (or none)." When present, the handler will build a
+	// per-request filter from this spec.
+	var piiSpec *PIIFilterSpec
+	if pf, ok := obj["pii_filter"].(map[string]any); ok {
+		piiSpec = parsePIIFilterSpec(pf)
+	}
+
 	return Decision{
 		Allow:          allow,
 		Escalate:       escalate,
 		Reason:         reason,
 		RequiresStepUp: requiresStepUp,
+		PIIFilter:      piiSpec,
 	}, nil
+}
+
+// parsePIIFilterSpec converts a Rego-supplied map into a PIIFilterSpec.
+// Missing or wrong-typed fields are tolerated (zero values used) — the
+// policy author may legitimately omit fields and let the gateway's
+// defaults apply, and the handler validates the final spec when
+// building the runtime filter.
+func parsePIIFilterSpec(m map[string]any) *PIIFilterSpec {
+	spec := &PIIFilterSpec{}
+	if v, ok := m["enabled"].(bool); ok {
+		spec.Enabled = v
+	}
+	if v, ok := m["default_action"].(string); ok {
+		spec.DefaultAction = v
+	}
+	if v, ok := m["patterns"].([]any); ok {
+		for _, p := range v {
+			if s, ok := p.(string); ok {
+				spec.Patterns = append(spec.Patterns, s)
+			}
+		}
+	}
+	if v, ok := m["per_pattern_action"].(map[string]any); ok {
+		spec.PerPatternAction = make(map[string]string, len(v))
+		for k, av := range v {
+			if s, ok := av.(string); ok {
+				spec.PerPatternAction[k] = s
+			}
+		}
+	}
+	if v, ok := m["custom_patterns"].([]any); ok {
+		for _, p := range v {
+			cp, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			class, _ := cp["class"].(string)
+			regex, _ := cp["regex"].(string)
+			if class != "" && regex != "" {
+				spec.CustomPatterns = append(spec.CustomPatterns, PIIFilterCustomPattern{
+					Class: class,
+					Regex: regex,
+				})
+			}
+		}
+	}
+	return spec
 }
 
 // Input is a convenience builder for the request shape policies see.

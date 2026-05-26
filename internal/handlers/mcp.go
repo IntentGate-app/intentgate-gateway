@@ -18,6 +18,7 @@ import (
 	"github.com/NetGnarus/intentgate-gateway/internal/extractor"
 	"github.com/NetGnarus/intentgate-gateway/internal/mcp"
 	"github.com/NetGnarus/intentgate-gateway/internal/metrics"
+	"github.com/NetGnarus/intentgate-gateway/internal/pii"
 	"github.com/NetGnarus/intentgate-gateway/internal/policy"
 	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
 	"github.com/NetGnarus/intentgate-gateway/internal/upstream"
@@ -105,6 +106,14 @@ type MCPHandlerConfig struct {
 	// (-32014). Read from INTENTGATE_PROVENANCE_ENABLED at startup.
 	// See internal/provenance and memos/aai03-memory-provenance-design.md.
 	ProvenanceEnabled bool
+	// PIIFilter is the opt-in LLM02 response-stream PII filter. When
+	// non-nil, every successful upstream tool response has its text
+	// content scanned for PII matching the tenant's configured pattern
+	// set; matches are either redacted in-place (default) or block the
+	// response entirely (-32015). When nil (the default), the filter
+	// stage is a no-op. See internal/pii and
+	// memos/llm02-pii-filter-design.md.
+	PIIFilter *pii.Filter
 }
 
 type mcpHandler struct {
@@ -342,7 +351,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	// All four checks passed. Either forward to the configured upstream
 	// or return the stub allow.
 	if h.cfg.Upstream != nil {
-		return h.forwardToUpstream(ctx, r, req, params, capResult, intResult, polResult.requiresStepUp, start)
+		return h.forwardToUpstream(ctx, r, req, params, capResult, intResult, polResult.requiresStepUp, polResult.piiOverride, start)
 	}
 
 	h.emitAudit(ctx, r, params, capResult, intResult,
@@ -392,6 +401,7 @@ func (h *mcpHandler) forwardToUpstream(
 	cap capabilityCheckResult,
 	intent intentCheckResult,
 	requiresStepUp bool,
+	piiOverride *policy.PIIFilterSpec,
 	start time.Time,
 ) *mcp.Response {
 	// Re-serialize the validated request so we forward exactly the
@@ -459,6 +469,74 @@ func (h *mcpHandler) forwardToUpstream(
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodeInternalError,
 			"upstream returned non-JSON-RPC body", err.Error())
+	}
+
+	// LLM02 PII filter — opt-in. Runs after the upstream returns its
+	// response, before we inject _intentgate metadata or audit the
+	// allow. Two configuration paths, tried in priority order:
+	//
+	//  1. Per-request Rego override (piiOverride) — built from the
+	//     policy decision's `pii_filter` field. Used when the policy
+	//     author wants endpoint- or tool-specific PII config (e.g.
+	//     allowing PII through for an account-holder reading their
+	//     own data).
+	//  2. Static gateway filter (h.cfg.PIIFilter) — set at startup
+	//     from env vars / config file. The default when no override.
+	//
+	// The filter may redact text content blocks in-place (safe to
+	// forward) or block the response entirely (-32015 to the agent).
+	// When neither config path produces a filter, this is a no-op.
+	activeFilter := h.cfg.PIIFilter
+	if piiOverride != nil {
+		// Build a one-shot filter from the policy spec. Errors
+		// (invalid regex, ReDoS) fail closed: the original static
+		// filter (if any) still applies; we don't silently bypass.
+		if f, err := pii.NewFilterFromSpec(pii.FilterSpec{
+			Enabled:          piiOverride.Enabled,
+			Patterns:         piiOverride.Patterns,
+			DefaultAction:    piiOverride.DefaultAction,
+			PerPatternAction: piiOverride.PerPatternAction,
+			CustomPatterns:   piiOverrideToCustomPatterns(piiOverride.CustomPatterns),
+		}); err == nil {
+			activeFilter = f
+		} else {
+			h.cfg.Logger.Warn("pii filter override invalid; using static config",
+				"agent", cap.agentID, "tool", params.Name, "err", err)
+		}
+	}
+	if activeFilter != nil && parsed.Result != nil {
+		redactedResult, piiDec := activeFilter.ApplyToMCPResult(parsed.Result)
+		switch piiDec.Action {
+		case pii.ActionBlock, pii.ActionEscalate:
+			// Refuse the response. The matched values are NOT returned
+			// or persisted — only per-class counts go into the audit row.
+			h.cfg.Metrics.ObserveCheck("pii", "block", time.Since(start))
+			h.emitAudit(ctx, r, params, cap, intent,
+				audit.DecisionBlock, audit.CheckPII,
+				fmt.Sprintf("pii filter blocked response (classes=%v)", piiDec.MatchedClasses),
+				start, upResp.Status,
+				withRequiresStepUp(requiresStepUp))
+			return mcp.NewErrorResponse(req.ID, mcp.CodePIIBlocked,
+				"response blocked by pii filter",
+				map[string]any{
+					"counts":  piiDec.Counts,
+					"classes": piiDec.MatchedClasses,
+				})
+		case pii.ActionRedact:
+			parsed.Result = redactedResult
+			h.cfg.Metrics.ObserveCheck("pii", "redact", time.Since(start))
+			h.emitAudit(ctx, r, params, cap, intent,
+				audit.DecisionAllow, audit.CheckPII,
+				fmt.Sprintf("pii filter redacted response (classes=%v)", piiDec.MatchedClasses),
+				start, upResp.Status,
+				withRequiresStepUp(requiresStepUp))
+			// fall through to inject metadata + return the (redacted) response
+		case pii.ActionAllow:
+			h.cfg.Metrics.ObserveCheck("pii", "allow", time.Since(start))
+			// No audit row when nothing matched — same noise-discipline
+			// as the provenance check (which is also opt-in and
+			// silent when it has nothing to say).
+		}
 	}
 
 	if parsed.Result != nil {
@@ -828,6 +906,13 @@ type policyCheckResult struct {
 	// fresh step-up factor, regardless of whether the policy also
 	// blocked them.
 	requiresStepUp bool
+	// piiOverride carries any per-request PII filter spec the policy
+	// returned (Rego field `pii_filter`). When non-nil, the handler
+	// uses this for the response-stream PII filter on this call
+	// instead of the gateway's static config. Most policies leave
+	// this nil; tenants who need per-tool overrides set it. See
+	// policy.PIIFilterSpec and memos/llm02-pii-filter-design.md.
+	piiOverride *policy.PIIFilterSpec
 }
 
 // budgetCheckResult bundles what the budget stage learned.
@@ -1020,15 +1105,16 @@ func (h *mcpHandler) runPolicyCheck(
 			reason:         d.Reason,
 			summary:        "escalate: " + d.Reason,
 			requiresStepUp: d.RequiresStepUp,
+			piiOverride:    d.PIIFilter,
 		}
 	}
 	if !d.Allow {
 		return policyCheckResult{err: capError(d.Reason), requiresStepUp: d.RequiresStepUp}
 	}
 	if d.Reason != "" {
-		return policyCheckResult{summary: "ok: " + d.Reason, requiresStepUp: d.RequiresStepUp}
+		return policyCheckResult{summary: "ok: " + d.Reason, requiresStepUp: d.RequiresStepUp, piiOverride: d.PIIFilter}
 	}
-	return policyCheckResult{summary: "ok", requiresStepUp: d.RequiresStepUp}
+	return policyCheckResult{summary: "ok", requiresStepUp: d.RequiresStepUp, piiOverride: d.PIIFilter}
 }
 
 // runBudgetCheck increments the per-token call counter and verifies
@@ -1165,6 +1251,26 @@ var (
 type capError string
 
 func (e capError) Error() string { return string(e) }
+
+// piiOverrideToCustomPatterns adapts the policy package's
+// PIIFilterCustomPattern shape to the pii package's
+// FilterSpecCustomPattern shape so neither package has to import the
+// other. The two structs are intentionally type-equivalent but kept
+// separate to keep the import graph one-directional (handlers depends
+// on both policy and pii; policy and pii don't depend on each other).
+func piiOverrideToCustomPatterns(in []policy.PIIFilterCustomPattern) []pii.FilterSpecCustomPattern {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pii.FilterSpecCustomPattern, 0, len(in))
+	for _, p := range in {
+		out = append(out, pii.FilterSpecCustomPattern{
+			Class: p.Class,
+			Regex: p.Regex,
+		})
+	}
+	return out
+}
 
 // write encodes a JSON-RPC response.
 func (h *mcpHandler) write(w http.ResponseWriter, resp *mcp.Response) {

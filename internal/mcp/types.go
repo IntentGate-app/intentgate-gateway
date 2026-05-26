@@ -98,6 +98,16 @@ const (
 	// broken, or whose envelope is structurally malformed. Opt-in
 	// feature; not emitted unless the tenant has provenance enabled.
 	CodeProvenanceFailed = -32014
+	// CodePIIBlocked is returned when the response-stream PII filter
+	// (introduced for LLM02 — see internal/pii and the
+	// memos/llm02-pii-filter-design.md design doc) blocks an upstream
+	// tool response because it contains data classes the tenant's
+	// policy declared off-limits in agent responses. Opt-in feature;
+	// not emitted unless the tenant has the filter enabled. The
+	// response's `data` payload carries per-class match counts only;
+	// the matched PII values are never returned to the caller or
+	// persisted in the audit chain.
+	CodePIIBlocked = -32015
 )
 
 // NewErrorResponse builds a JSON-RPC 2.0 error response.

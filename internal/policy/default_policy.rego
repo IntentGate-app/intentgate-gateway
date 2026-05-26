@@ -62,3 +62,59 @@ decision := {"allow": false, "reason": "transfer above 10000 EUR threshold"} if 
 decision := {"allow": false, "reason": "destructive tool blocked by policy"} if {
 	input.tool in {"delete", "drop_table", "factory_reset", "purge_audit"}
 }
+
+# -----------------------------------------------------------------------------
+# Optional: per-request PII output filter (LLM02)
+# -----------------------------------------------------------------------------
+#
+# Any decision rule may include a `pii_filter` block. When present, the
+# gateway runs the response from the upstream MCP server through that
+# filter before forwarding to the agent. When absent, the gateway's
+# static filter (configured via INTENTGATE_PII_FILTER_* env vars) is
+# used; when neither is configured, no filtering happens.
+#
+# Three-tier fallback: per-request Rego override → static gateway filter
+# → no filter. Audit row always records the action chosen, including
+# Allow with zero counts. Counts only, never matched values.
+#
+# Built-in classes: email, phone_intl, iban, bsn, credit_card, ssn_us,
+# vat_eu, ipv4, ipv6. Unknown class names are silently skipped.
+#
+# Built-in actions: allow, redact (default), block, escalate. "most
+# restrictive wins" across all matched classes.
+#
+# Example: routine customer-support tool — redact contact info, hard
+# block on payment instruments. Uncomment and adapt:
+#
+# decision := {
+#     "allow":  true,
+#     "reason": "support-tool read; PII filter applied",
+#     "pii_filter": {
+#         "enabled":        true,
+#         "patterns":       ["email", "phone_intl", "iban", "credit_card"],
+#         "default_action": "redact",
+#         "per_pattern_action": {
+#             "iban":        "block",
+#             "credit_card": "block",
+#         },
+#     },
+# } if {
+#     startswith(input.tool, "support_")
+# }
+#
+# Example: account holder reading their own data — let everything
+# through but log it (Allow + counts in the audit chain). Uncomment
+# and adapt:
+#
+# decision := {
+#     "allow":  true,
+#     "reason": "self-read; PII filter in observe-only mode",
+#     "pii_filter": {
+#         "enabled":        true,
+#         "patterns":       ["email", "phone_intl", "iban", "bsn"],
+#         "default_action": "allow",
+#     },
+# } if {
+#     input.tool == "read_self"
+#     input.capability.subject == input.args.account_id
+# }
