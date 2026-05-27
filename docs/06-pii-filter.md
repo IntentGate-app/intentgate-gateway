@@ -45,7 +45,7 @@ policy allow, budget remaining. They don't read argument values or
 response bodies. Check 6 is the only check that inspects *content*,
 and it does so in both directions. It is the gateway's enforcement
 point for GDPR Article 5(1)(c) (minimisation), Article 32 (security
-of processing), and outbound-credentialinhibitsion.
+of processing), and outbound credential exfiltration prevention.
 
 ---
 

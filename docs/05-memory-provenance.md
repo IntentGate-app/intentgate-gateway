@@ -1,4 +1,4 @@
-# Memory Provenance (AAI03 Defense)
+# Memory Provenance (AGENT06 Defense)
 
 **Status:** Shipped 2026-05-24 · Opt-in via `INTENTGATE_PROVENANCE_ENABLED=true`
 **Pipeline position:** Check 3, between intent and policy
@@ -13,7 +13,7 @@ of `docs/IntentGate-Vendor-Security-Pack.docx`.
 
 ## The threat
 
-The sophisticated case of OWASP Agentic AI Top 10 AAI03: an attacker
+The sophisticated case of OWASP Agentic AI Top 10 AGENT06 (Memory Poisoning): an attacker
 has write access to the agent's memory store (vector DB, RAG corpus,
 scratchpad) but has NOT compromised the user's prompt channel and has
 NOT stolen a capability token. The attacker plants a memory entry
@@ -216,7 +216,7 @@ KEY=$(echo "$RESP" | jq -r .memory_signing_key | base64url -d > key.bin)
 # construction in shell is a stamp-collector's project.)
 ```
 
-For a full end-to-end demo, use the AAI03 card on
+For a full end-to-end demo, use the memory-poisoning card on
 `/lab/attacks` of any IntentGate lab deployment with provenance
 enabled — it stages a legitimate write, simulates a storage-layer
 tamper, and shows the gateway rejecting with `entry 0: hmac

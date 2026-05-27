@@ -1,9 +1,9 @@
 # API authentication
 
-This document is the answer to *"how do you authenticate against the
-API?"* — the question every CISO asks in the first vendor call.
-Quickstart Guide 01 covers the operational steps; this one covers
-the model, the threat surface, and the standard follow-up questions.
+This document describes how callers authenticate against the IntentGate
+API. Quickstart Guide 01 covers the operational steps; this one covers
+the authentication model, the threat surface, and the standard
+follow-up questions.
 
 ## Three API surfaces
 
@@ -169,8 +169,8 @@ admin-token mismatch on `/v1/admin/*`) all land too, with distinct
 "policy rejected".
 
 The audit chain is tamper-evident: rows are HMAC-linked to the
-previous row. AAI10 (Audit Tampering — Postgres rewrite) on the lab
-proves the chain catches direct row edits.
+previous row. The audit-tampering lab card (Postgres rewrite of a
+historical row) demonstrates that the chain catches direct row edits.
 
 ## Why not OAuth 2.0?
 
@@ -232,14 +232,13 @@ OAuth IdP as the source of truth, IntentGate handles per-call
 authorization downstream." We can ship a reference implementation
 if a prospect needs one — it's not in the OSS today.
 
-**Summary line for a CISO:**
-
-> *"OIDC for human operator login, capability tokens for agent
-> authorization. The agent path isn't OAuth by design — capability
-> tokens give us per-call caveats, attenuation without a round trip,
-> and in-process verification that OAuth can't match. We bridge to
-> your existing OAuth IdP if that's where your identity source of
-> truth lives."*
+**Summary.** OIDC for human operator login, capability tokens for
+agent authorization. The agent path is deliberately not OAuth:
+capability tokens carry per-call caveats, support attenuation without
+a round trip, and verify in-process — properties OAuth bearer tokens
+don't provide. A customer that wants their existing OAuth IdP to
+remain the source of truth for identity bridges into IntentGate via
+the mint pattern described above.
 
 ## Standard follow-ups
 
