@@ -138,6 +138,37 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["from_account", "to_account", "amount_eur"],
         },
     },
+    {
+        "name": "flaky_demo",
+        "description": (
+            "Controlled-failure tool used by the AGENT08 cascading-failure "
+            "lab card. The caller sets `failure_mode` to force the tool "
+            "server to return a real HTTP 5xx (502, 503, or 500) instead "
+            "of a successful response. The gateway's fault-isolation "
+            "breaker counts status >= 500 against the per-tool failure "
+            "threshold; once the threshold is crossed, the breaker opens "
+            "and subsequent calls fail fast at -32018 without ever "
+            "contacting upstream. Used for live demos of the breaker "
+            "opening on a degraded dependency."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "failure_mode": {
+                    "type": "string",
+                    "description": (
+                        "One of 'ok' (default — synthetic success), "
+                        "'502'/'bad_gateway', '503'/'unavailable', or "
+                        "'500'/'internal_error'. Any 5xx mode causes the "
+                        "tool server to return that HTTP status code, "
+                        "which the gateway's breaker counts as a failure."
+                    ),
+                    "default": "ok",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -295,6 +326,51 @@ def tool_read_customer(args: dict[str, Any]) -> dict[str, Any]:
     return match
 
 
+class FlakyToolFailure(Exception):
+    """Raised by tool_flaky_demo to force a specific HTTP status code
+    out of the JSON-RPC handler. The gateway's fault-isolation breaker
+    counts upstream HTTP status >= 500 as a failure, so the AGENT08
+    cascading-failure lab card needs an upstream that can return a real
+    5xx rather than a JSON-RPC application error. This exception is the
+    signalling channel between the tool function (which decides the
+    failure mode based on its args) and the handler (which writes the
+    HTTP response with the chosen status code)."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        self.status_code = status_code
+        self.message = message
+        super().__init__(message)
+
+
+def tool_flaky_demo(args: dict[str, Any]) -> dict[str, Any]:
+    """Controlled-failure tool for the AGENT08 cascading-failure
+    lab card. Stateless by design — the caller decides per-call
+    whether to fail and which 5xx to return, so the demo flow is
+    deterministic and replayable. Set failure_mode=502/503/500 to
+    raise FlakyToolFailure (which the handler turns into a real
+    HTTP 5xx response, which the gateway's breaker counts as a
+    failure for the per-tool failure threshold). Set failure_mode=ok
+    (or omit) to return a synthetic success — used as the half-open
+    probe at the end of a demo, to show the breaker closing again
+    once the dependency recovers."""
+    mode = str(args.get("failure_mode", "ok")).lower().strip()
+    if mode in ("502", "bad_gateway"):
+        raise FlakyToolFailure(502, "synthetic 502 from flaky_demo")
+    if mode in ("503", "unavailable", "service_unavailable"):
+        raise FlakyToolFailure(503, "synthetic 503 from flaky_demo")
+    if mode in ("500", "internal", "internal_error"):
+        raise FlakyToolFailure(500, "synthetic 500 from flaky_demo")
+    return {
+        "ok": True,
+        "tool": "flaky_demo",
+        "failure_mode": mode,
+        "_note": (
+            "set failure_mode=502|503|500 to force a real HTTP 5xx, "
+            "which the gateway's AGENT08 breaker counts as a failure"
+        ),
+    }
+
+
 def tool_transfer_funds(args: dict[str, Any]) -> dict[str, Any]:
     """Return a 'would-transfer' acknowledgement. The DEMO doesn't
     move real money — this is a deliberately stubbed return so the
@@ -326,6 +402,7 @@ TOOL_DISPATCH = {
     "list_customers": tool_list_customers,
     "read_customer": tool_read_customer,
     "transfer_funds": tool_transfer_funds,
+    "flaky_demo": tool_flaky_demo,
 }
 
 
@@ -420,6 +497,15 @@ async def jsonrpc(request: Request) -> JSONResponse:
             )
         try:
             return JSONResponse(content=_result(req_id, fn(args)))
+        except FlakyToolFailure as exc:
+            # tool_flaky_demo signals a forced HTTP-level failure here.
+            # The gateway's fault-isolation breaker counts upstream
+            # status >= 500 toward the per-tool failure threshold —
+            # this is the codepath the AGENT08 lab card exercises.
+            return JSONResponse(
+                content=_error(req_id, INTERNAL_ERROR, exc.message),
+                status_code=exc.status_code,
+            )
         except ValueError as exc:
             return JSONResponse(
                 content=_error(req_id, INVALID_PARAMS, str(exc)),
