@@ -2,7 +2,9 @@
 
 End-user documentation for platform engineers, security engineers, and developers integrating IntentGate into their AI agent stack. Each guide is focused on a single milestone you'll hit when bringing the gateway into your environment.
 
-If you're new here, start with **[01 — Quickstart](./01-quickstart.md)**. It gets a gateway running locally in five minutes against an in-memory backend so you can see the four-control pipeline fire on a real request.
+If you want the whole mental model before any one check, read **[00 — Architecture](./00-architecture.md)** first. It covers the bidirectional inspection pipeline (request side: capability → intent → provenance → policy → budget → PII out → tenant scope → fault isolation; response side: PII in → output schema), the trust boundary, the audit chain, and the reasoning behind the major design decisions.
+
+If you're new here and want to see something fire on a real request, start with **[01 — Quickstart](./01-quickstart.md)** instead. It gets a gateway running locally in five minutes against an in-memory backend.
 
 ## Where IntentGate sits
 
@@ -92,6 +94,7 @@ The dashed node — memory provenance — is an opt-in fifth check that verifies
 
 | # | Guide | Audience | Time |
 |---|-------|----------|------|
+| 00 | [Architecture — the bidirectional inspection model](./00-architecture.md) | Engineers new to IntentGate | 10 min |
 | 01 | [Quickstart — gateway running in 5 minutes](./01-quickstart.md) | Anyone evaluating IntentGate | 5 min |
 | 02 | [Your first Rego policy](./02-first-policy.md) | Platform / security engineer | 15 min |
 | 03 | [Wire your first agent (Python SDK)](./03-first-agent.md) | Application developer | 15 min |
