@@ -1,0 +1,766 @@
+openapi: 3.1.0
+info:
+  title: IntentGate Gateway API
+  version: "1.7.0"
+  summary: HTTP surface of the IntentGate authorization gateway.
+  description: |
+    Two surfaces, one binary:
+
+    - **Runtime path** (`/v1/mcp`, `/v1/tool-call`) — called by agent
+      runtimes on every tool invocation. Traverses the four-check
+      pipeline (capability, intent, policy, budget) and either
+      forwards to the upstream tool server or returns a typed
+      JSON-RPC error.
+    - **Admin path** (`/v1/admin/*`) — called by operators and the
+      console. Mint capability tokens, manage policies, query and
+      verify the audit chain, review approvals, switch tenants,
+      inspect SIEM integrations.
+
+    Authentication uses bearer tokens for both surfaces. Stable
+    across the v1 series; breaking changes ship as `/v2`.
+  contact:
+    name: IntentGate B.V.
+    url: https://intentgate.app
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: https://gateway.example.com
+    description: Customer deployment (substitute your own host)
+  - url: http://localhost:8080
+    description: Local dev (default Docker / docker-compose)
+
+tags:
+  - name: Runtime
+    description: Agent-facing tool-call endpoints. Traverses the four-check pipeline.
+  - name: Capabilities
+    description: Mint, revoke, and inspect capability tokens.
+  - name: Policies
+    description: Two-stage lifecycle — drafts, active, dry-run, rollback.
+  - name: Audit
+    description: Tamper-evident audit chain — query, verify, export.
+  - name: Approvals
+    description: Human-review queue for policy-escalated calls.
+  - name: Tenants
+    description: Tenant inventory for the console switcher.
+  - name: Integrations
+    description: SIEM and webhook destination health.
+
+# ────────────────────────────────────────────────────────────────────
+# Security: bearer tokens (capability for runtime, admin for /v1/admin)
+# ────────────────────────────────────────────────────────────────────
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "Capability token (runtime) or admin token (admin)"
+      description: |
+        - **Runtime** endpoints accept a **capability token** signed by
+          the gateway's master key. Issued by `POST /v1/admin/mint`.
+        - **Admin** endpoints (`/v1/admin/*`) accept either the
+          **superadmin token** (`INTENTGATE_ADMIN_TOKEN`) or a
+          **per-tenant admin token** (`INTENTGATE_TENANT_ADMIN_TOKENS`).
+          Tokens are compared in constant time.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missing:
+              value: { error: "invalid or missing admin token" }
+    NotFound:
+      description: Resource not found (or cross-tenant — gateway returns 404 to avoid leaking existence).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Validation error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: A dependency (policy store, master key) is not configured.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  parameters:
+    Tenant:
+      name: tenant
+      in: query
+      description: Superadmin-only — scope the operation to a tenant. Per-tenant admin tokens force scope and ignore this.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      description: Maximum items to return (1-1000).
+      schema: { type: integer, default: 100, minimum: 1, maximum: 1000 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned in the prior response's `next_cursor`.
+      schema: { type: string }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+
+    # ── Runtime ─────────────────────────────────────────────────
+    JsonRpcRequest:
+      type: object
+      required: [jsonrpc, id, method]
+      properties:
+        jsonrpc: { type: string, enum: ["2.0"] }
+        id: { type: string, description: Caller-chosen correlation ID. }
+        method:
+          type: string
+          enum: [tools/call, tools/list, initialize, ping]
+        params:
+          type: object
+          additionalProperties: true
+    JsonRpcResponse:
+      type: object
+      properties:
+        jsonrpc: { type: string, enum: ["2.0"] }
+        id: { type: string }
+        result: { description: Upstream response (forwarded verbatim on allow). }
+        error: { $ref: "#/components/schemas/JsonRpcError" }
+    JsonRpcError:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: |
+            Typed gateway error code:
+              * -32010 capability check failed
+              * -32011 intent check failed
+              * -32012 policy check failed
+              * -32013 budget exceeded
+              * -32014 escalated to approvals
+          enum: [-32010, -32011, -32012, -32013, -32014]
+        message: { type: string }
+        data:
+          type: object
+          description: Decision context — resolved call, failing rule, policy hash, budget counters.
+          additionalProperties: true
+
+    # ── Capabilities ────────────────────────────────────────────
+    MintRequest:
+      type: object
+      required: [subject]
+      properties:
+        subject:    { type: string, example: "agent-finance-bot-7" }
+        issuer:     { type: string, example: "intentgate" }
+        tenant:     { type: string, example: "acme-corp" }
+        ttl_seconds: { type: integer, example: 3600 }
+        tools:
+          type: array
+          items: { type: string }
+          example: [read_invoice, list_vendors]
+        max_calls:  { type: integer, example: 100 }
+        step_up:    { type: boolean, example: false }
+        with_memory_signing_key: { type: boolean, example: false }
+    MintResponse:
+      type: object
+      required: [token, jti]
+      properties:
+        token:      { type: string, description: Opaque to the agent — never parse. }
+        jti:        { type: string, example: "01HXYZ..." }
+        expires_at: { type: string, format: date-time, nullable: true }
+
+    RevokeRequest:
+      type: object
+      required: [jti]
+      properties:
+        jti:    { type: string, example: "01HXYZ..." }
+        reason: { type: string, example: "rotation" }
+
+    Revocation:
+      type: object
+      properties:
+        jti:        { type: string }
+        tenant:     { type: string }
+        revoked_at: { type: string, format: date-time }
+        reason:     { type: string }
+    RevocationList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Revocation" }
+        next_cursor: { type: string, nullable: true }
+
+    # ── Policies ────────────────────────────────────────────────
+    DraftSummary:
+      type: object
+      properties:
+        id:           { type: string }
+        name:         { type: string }
+        description:  { type: string }
+        tenant:       { type: string }
+        created_by:   { type: string }
+        created_at:   { type: string, format: date-time }
+        rego_sha256:  { type: string }
+    Draft:
+      allOf:
+        - $ref: "#/components/schemas/DraftSummary"
+        - type: object
+          properties:
+            rego_source: { type: string }
+    DraftCreate:
+      type: object
+      required: [rego_source]
+      properties:
+        name:        { type: string, example: "baseline-2026-06" }
+        description: { type: string, example: "Add value-threshold rule for transfer_funds" }
+        rego_source: { type: string, example: "package intentgate.policy\n..." }
+        tenant:      { type: string, example: "acme-corp" }
+        created_by:  { type: string, example: "joe@acme-corp.example" }
+    DraftUpdate:
+      type: object
+      properties:
+        name:        { type: string }
+        description: { type: string }
+        rego_source: { type: string }
+
+    ActivePolicy:
+      type: object
+      properties:
+        draft_id:     { type: string }
+        name:         { type: string }
+        promoted_by:  { type: string }
+        promoted_at:  { type: string, format: date-time }
+        rego_sha256:  { type: string }
+        tenant:       { type: string }
+    PromoteRequest:
+      type: object
+      required: [draft_id]
+      properties:
+        draft_id:    { type: string, example: "01HXYZ..." }
+        tenant:      { type: string, description: Superadmin only; per-tenant admin uses token's tenant. }
+        promoted_by: { type: string, example: "joe@acme-corp.example" }
+
+    DryRunRequest:
+      type: object
+      required: [rego_source]
+      properties:
+        rego_source: { type: string }
+        tenant:      { type: string }
+        input:
+          type: object
+          description: A single synthetic input event (mutually exclusive with `sample`).
+          additionalProperties: true
+        sample:
+          type: string
+          description: Named slice of recent audit history (e.g. "last-24h").
+    DryRunResult:
+      type: object
+      properties:
+        decisions:
+          type: array
+          items:
+            type: object
+            properties:
+              input: { type: object, additionalProperties: true }
+              candidate_decision: { type: string, enum: [allow, block, escalate] }
+              actual_decision:    { type: string, enum: [allow, block, escalate], nullable: true }
+              rule:               { type: string, nullable: true }
+
+    # ── Audit ───────────────────────────────────────────────────
+    AuditEvent:
+      type: object
+      properties:
+        ts:                       { type: string, format: date-time }
+        event:                    { type: string, example: "intentgate.tool_call" }
+        schema_version:           { type: string, example: "v4" }
+        decision:                 { type: string, enum: [allow, block, escalate] }
+        check:
+          type: string
+          enum: ["", capability, intent, provenance, policy, budget, upstream, pii, output_schema, tenant_scope]
+        reason:                   { type: string }
+        tenant:                   { type: string }
+        agent_id:                 { type: string }
+        session_id:               { type: string }
+        tool:                     { type: string }
+        arg_keys:                 { type: array, items: { type: string } }
+        arg_values:               { type: object, additionalProperties: true }
+        capability_token_id:      { type: string }
+        root_capability_token_id: { type: string }
+        caveat_count:             { type: integer }
+        pending_id:               { type: string }
+        decided_by:               { type: string }
+        intent_summary:           { type: string }
+        latency_ms:               { type: integer }
+        remote_ip:                { type: string }
+        upstream_status:          { type: integer }
+        requires_step_up:         { type: boolean }
+        elevation_id:             { type: string }
+    AuditList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEvent" }
+        next_cursor: { type: string, nullable: true }
+    AuditVerify:
+      type: object
+      properties:
+        tenant:         { type: string }
+        verified:       { type: boolean }
+        events_checked: { type: integer, example: 184523 }
+        chain_head_id:  { type: string }
+        chain_head_at:  { type: string, format: date-time }
+        duration_ms:    { type: integer, example: 412 }
+        first_broken_event_id:
+          type: string
+          nullable: true
+          description: Set when verified=false.
+
+    # ── Approvals ───────────────────────────────────────────────
+    Approval:
+      type: object
+      properties:
+        id:                  { type: string }
+        tenant:              { type: string }
+        agent_id:            { type: string }
+        capability_token_id: { type: string }
+        tool:                { type: string }
+        arguments:           { type: object, additionalProperties: true }
+        escalating_rule:     { type: string }
+        created_at:          { type: string, format: date-time }
+    ApprovalList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Approval" }
+        next_cursor: { type: string, nullable: true }
+    DecisionRequest:
+      type: object
+      required: [decision, decided_by]
+      properties:
+        decision:   { type: string, enum: [approve, reject] }
+        reason:     { type: string }
+        decided_by: { type: string, example: "joe@acme-corp.example" }
+
+    # ── Tenants ─────────────────────────────────────────────────
+    Tenant:
+      type: object
+      properties:
+        name:               { type: string, example: "acme-corp" }
+        active_policy_sha:  { type: string }
+        pending_approvals:  { type: integer }
+        recent_event_count: { type: integer, description: Audit events in the last hour. }
+
+    # ── Integrations ────────────────────────────────────────────
+    IntegrationStatus:
+      type: object
+      properties:
+        name:           { type: string, enum: [splunk, datadog, sentinel, s3, webhook] }
+        configured:     { type: boolean }
+        endpoint:       { type: string }
+        last_flush_ts:  { type: string, format: date-time, nullable: true }
+        events_flushed: { type: integer }
+        events_dropped: { type: integer }
+        last_error:     { type: string, nullable: true }
+
+# ────────────────────────────────────────────────────────────────────
+# Paths
+# ────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Runtime ───────────────────────────────────────────────────
+  /v1/mcp:
+    post:
+      tags: [Runtime]
+      summary: Model Context Protocol passthrough
+      description: |
+        Accepts MCP messages over JSON-RPC 2.0 — `initialize`,
+        `tools/list`, `ping`, and tool invocations. Tool invocations
+        traverse the full four-check pipeline; the others are
+        forwarded to the upstream tool server with light validation.
+
+        Recommended endpoint for any agent that already speaks MCP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JsonRpcRequest" }
+      responses:
+        "200":
+          description: Allowed call forwarded; response from upstream tool server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonRpcResponse" }
+
+  /v1/tool-call:
+    post:
+      tags: [Runtime]
+      summary: Direct JSON-RPC tool invocation
+      description: |
+        For agents that don't speak MCP. Same authorization pipeline
+        as `/v1/mcp`; the wire shape is plain JSON-RPC 2.0.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JsonRpcRequest" }
+      responses:
+        "200":
+          description: Allowed call forwarded; upstream response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JsonRpcResponse" }
+
+  # ── Capabilities ──────────────────────────────────────────────
+  /v1/admin/mint:
+    post:
+      tags: [Capabilities]
+      summary: Issue a fresh capability token
+      description: |
+        Requires `INTENTGATE_MASTER_KEY` to be set. `subject` is the
+        only required field. Optional `tools` restricts to a
+        whitelist, `max_calls` encodes a budget caveat, `step_up`
+        stamps a fresh-factor timestamp Rego reads via
+        `input.capability.step_up_at`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MintRequest" }
+      responses:
+        "200":
+          description: Minted token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MintResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+
+  /v1/admin/revoke:
+    post:
+      tags: [Capabilities]
+      summary: Revoke a capability token by JTI
+      description: |
+        Subsequent runtime calls presenting that JTI fail the
+        capability check with `-32010`. Per-tenant admins can only
+        revoke tokens issued under their tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RevokeRequest" }
+      responses:
+        "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/revocations:
+    get:
+      tags: [Capabilities]
+      summary: List revoked JTIs
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Revocations.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RevocationList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── Policies ──────────────────────────────────────────────────
+  /v1/admin/policies/drafts:
+    get:
+      tags: [Policies]
+      summary: List draft policies
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Drafts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DraftSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Policies]
+      summary: Create a draft
+      description: Rego is compiled at save time. Bad Rego returns 400 with OPA's parser error verbatim.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DraftCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Draft" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/policies/drafts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Policies]
+      summary: Fetch a draft (including Rego source)
+      responses:
+        "200":
+          description: Draft.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Draft" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Policies]
+      summary: Update a draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DraftUpdate" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Draft" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Policies]
+      summary: Delete a draft
+      responses:
+        "204": { description: Deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/admin/policies/active:
+    get:
+      tags: [Policies]
+      summary: Read the active-policy pointer
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Active policy metadata.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivePolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Policies]
+      summary: Promote a draft to active
+      description: |
+        Recompiles, swaps the per-tenant active engine, writes the
+        pointer, fans the change out to every replica via Postgres
+        `LISTEN`/`NOTIFY`. Compile errors return 400 and leave the
+        prior policy running.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PromoteRequest" }
+      responses:
+        "200":
+          description: Promoted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivePolicy" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Policies]
+      summary: Clear the active pointer
+      description: The tenant reverts to fail-closed until a new active is promoted.
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "204": { description: Cleared. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/policies/rollback:
+    post:
+      tags: [Policies]
+      summary: Roll back to the previous active policy
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Rolled back.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivePolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/policies/dry-run:
+    post:
+      tags: [Policies]
+      summary: Evaluate a candidate Rego against synthetic or historical input
+      description: Either `input` or `sample` is required. Does not change the active pointer.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DryRunRequest" }
+      responses:
+        "200":
+          description: Decisions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DryRunResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── Audit ─────────────────────────────────────────────────────
+  /v1/admin/audit:
+    get:
+      tags: [Audit]
+      summary: Query the per-tenant audit chain
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - { name: since,    in: query, schema: { type: string, format: date-time } }
+        - { name: until,    in: query, schema: { type: string, format: date-time } }
+        - { name: decision, in: query, schema: { type: string, enum: [allow, block, escalate] } }
+        - { name: tool,     in: query, schema: { type: string } }
+        - { name: subject,  in: query, schema: { type: string } }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Audit events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/audit/verify:
+    get:
+      tags: [Audit]
+      summary: Verify the tamper-evident chain
+      description: |
+        Walks every event for the tenant and reports whether each
+        hash link reconciles. The daily compliance attestation for
+        BIO, ISO 27001, and EU AI Act auditors. Read replica safe.
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+      responses:
+        "200":
+          description: Verification result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditVerify" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/audit/export:
+    get:
+      tags: [Audit]
+      summary: Stream audit events for offline review
+      parameters:
+        - { name: format, in: query, required: true, schema: { type: string, enum: [csv, ndjson] } }
+        - $ref: "#/components/parameters/Tenant"
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Stream.
+          content:
+            text/csv: { schema: { type: string } }
+            application/x-ndjson: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── Approvals ─────────────────────────────────────────────────
+  /v1/admin/approvals:
+    get:
+      tags: [Approvals]
+      summary: List pending approvals
+      parameters:
+        - $ref: "#/components/parameters/Tenant"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Pending approvals.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/admin/approvals/{id}/decide:
+    post:
+      tags: [Approvals]
+      summary: Approve or reject a parked call
+      description: |
+        On `approve`, the gateway re-evaluates the call (modulo the
+        escalate rule) and forwards if it passes. On `reject`, the
+        call is denied. Cross-tenant IDs return 404.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+      responses:
+        "204": { description: Decided. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Tenants ───────────────────────────────────────────────────
+  /v1/admin/tenants:
+    get:
+      tags: [Tenants]
+      summary: List configured tenants
+      responses:
+        "200":
+          description: Tenants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Tenant" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── Integrations ──────────────────────────────────────────────
+  /v1/admin/integrations:
+    get:
+      tags: [Integrations]
+      summary: Status of every configured SIEM and webhook destination
+      description: |
+        Sensitive fields (HEC tokens, API keys, shared keys) are
+        never returned — only labels and counters.
+      responses:
+        "200":
+          description: Integration statuses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IntegrationStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
