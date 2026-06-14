@@ -1,0 +1,7 @@
+// Budget-exceeded denials, hour-bucketed. Spikes indicate either a
+// runaway agent loop (build a circuit breaker upstream) or a
+// budget set too tight for the legitimate workload.
+IntentGate_CL
+| where check_s == "budget"
+| summarize denials = count() by bin(TimeGenerated, 1h), tenant_s
+| render timechart

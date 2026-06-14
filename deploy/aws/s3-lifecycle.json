@@ -1,0 +1,13 @@
+{
+  "Rules": [
+    {
+      "ID": "intentgate-audit-tiering",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "audit/" },
+      "Transitions": [
+        { "Days": 30,  "StorageClass": "GLACIER_IR" },
+        { "Days": 365, "StorageClass": "DEEP_ARCHIVE" }
+      ]
+    }
+  ]
+}

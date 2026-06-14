@@ -1,0 +1,9 @@
+// Capability tokens presented after revocation. Each row is a
+// potential indicator of compromise — an agent or attacker still
+// holding a token after the operator revoked it. Investigate the
+// remote_ip and agent_id.
+IntentGate_CL
+| where check_s == "capability"
+| where reason_s has "revoked"
+| project TimeGenerated, capability_token_id_s, agent_id_s, tenant_s, remote_ip_s
+| order by TimeGenerated desc

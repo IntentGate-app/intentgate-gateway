@@ -1,0 +1,8 @@
+// JIT elevations granted in the last 7 days, with the operator who
+// approved each. Daily audit-pack input for SOC 2 CC6.6 and
+// ISO 27001 A.5.16 evidence.
+IntentGate_CL
+| where TimeGenerated > ago(7d)
+| where event_s == "audit.elevation" and decision_s == "allow"
+| project TimeGenerated, tenant_s, agent_id_s, decided_by_s, elevation_id_s, reason_s
+| order by TimeGenerated desc

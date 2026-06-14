@@ -1,0 +1,8 @@
+// Authorization latency p95 by tool over the last 24h. Use to
+// identify tools where the gateway is the bottleneck (rare — usually
+// upstream is) versus tools where authorization itself is slow.
+IntentGate_CL
+| where TimeGenerated > ago(24h)
+| where decision_s == "allow"
+| summarize p95 = percentile(latency_ms_d, 95) by tool_s
+| order by p95 desc

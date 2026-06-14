@@ -1,0 +1,7 @@
+// Top 10 agents triggering human-review escalations. A persistent
+// outlier here usually means the agent's prompt or tools need
+// tightening, not that the policy needs loosening.
+IntentGate_CL
+| where decision_s == "escalate"
+| summarize escalations = count() by agent_id_s, tenant_s
+| top 10 by escalations

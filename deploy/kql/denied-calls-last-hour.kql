@@ -1,0 +1,7 @@
+// All denied tool calls in the last hour. The bread-and-butter SOC
+// query — alert if the per-tenant count spikes above baseline.
+IntentGate_CL
+| where TimeGenerated > ago(1h)
+| where decision_s == "block"
+| project TimeGenerated, tenant_s, agent_id_s, tool_s, check_s, reason_s
+| order by TimeGenerated desc

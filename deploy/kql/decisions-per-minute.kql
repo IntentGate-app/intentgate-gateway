@@ -1,0 +1,7 @@
+// Live decision-rate chart for the on-call dashboard. Stacked by
+// decision so the operator sees allow / block / escalate volumes
+// at a glance.
+IntentGate_CL
+| where TimeGenerated > ago(1h)
+| summarize decisions = count() by bin(TimeGenerated, 1m), decision_s
+| render timechart

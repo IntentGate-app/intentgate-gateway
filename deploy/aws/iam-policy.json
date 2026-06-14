@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowAuditWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_WITH_YOUR_BUCKET/audit/*"
+    },
+    {
+      "Sid": "OptionalKMSForSSEKMS",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "arn:aws:kms:REPLACE_REGION:REPLACE_ACCOUNT:key/REPLACE_KEY_ID"
+    }
+  ]
+}

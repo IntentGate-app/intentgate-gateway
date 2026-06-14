@@ -1,0 +1,8 @@
+// Which Rego rules are firing the most in the last 24 hours.
+// Use to spot a policy that's too aggressive (causing legitimate
+// blocks) or a real attack pattern (one rule dominating).
+IntentGate_CL
+| where TimeGenerated > ago(24h)
+| where check_s == "policy"
+| summarize denied = count() by reason_s, tenant_s
+| order by denied desc
