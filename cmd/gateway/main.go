@@ -235,6 +235,17 @@ func main() {
 	sentinelTenantID := envOr("INTENTGATE_SIEM_SENTINEL_TENANT_ID", "")
 	sentinelClientID := envOr("INTENTGATE_SIEM_SENTINEL_CLIENT_ID", "")
 	sentinelClientSecret := envOr("INTENTGATE_SIEM_SENTINEL_CLIENT_SECRET", "")
+	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
+	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
+	// so Athena / Glue / Spark can prune partitions at query time
+	// without an MSCK REPAIR. Credentials come from the default AWS
+	// chain (IRSA / EC2 role / env vars). Bucket alone enables the
+	// sink; prefix defaults to "audit/".
+	s3Bucket := envOr("INTENTGATE_SIEM_S3_BUCKET", "")
+	s3Prefix := envOr("INTENTGATE_SIEM_S3_PREFIX", "")
+	s3Region := envOr("INTENTGATE_SIEM_S3_REGION", "")
+	s3KMSKeyID := envOr("INTENTGATE_SIEM_S3_KMS_KEY_ID", "")
+	s3GatewayID := envOr("INTENTGATE_SIEM_S3_GATEWAY_ID", "")
 	// Webhook fan-out (Pro v2 #3). URL is the operator-configured
 	// receiver — typically a console-pro endpoint that re-routes
 	// per-tenant to Slack / Teams / PagerDuty. Empty disables the
@@ -437,6 +448,11 @@ func main() {
 		sentinelTenantID:     sentinelTenantID,
 		sentinelClientID:     sentinelClientID,
 		sentinelClientSecret: sentinelClientSecret,
+		s3Bucket:             s3Bucket,
+		s3Prefix:             s3Prefix,
+		s3Region:             s3Region,
+		s3KMSKeyID:           s3KMSKeyID,
+		s3GatewayID:          s3GatewayID,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -903,6 +919,11 @@ type siemEnv struct {
 	sentinelTenantID     string
 	sentinelClientID     string
 	sentinelClientSecret string
+	s3Bucket             string
+	s3Prefix             string
+	s3Region             string
+	s3KMSKeyID           string
+	s3GatewayID          string
 }
 
 // loadSIEM constructs whichever SIEM emitters the operator has wired
@@ -978,6 +999,27 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"dce", env.sentinelDCEURL,
 			"dcr", env.sentinelDCRID,
 			"stream", env.sentinelStream)
+	}
+
+	if env.s3Bucket != "" {
+		em, err := siem.NewS3Emitter(siem.S3Config{
+			Bucket:    env.s3Bucket,
+			Prefix:    env.s3Prefix,
+			Region:    env.s3Region,
+			KMSKeyID:  env.s3KMSKeyID,
+			GatewayID: env.s3GatewayID,
+			Logger:    logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("s3: %w", err)
+		}
+		emitters = append(emitters, em)
+		reporters = append(reporters, em)
+		labels = append(labels, "s3")
+		logger.Info("SIEM emitter: s3",
+			"bucket", env.s3Bucket,
+			"prefix", env.s3Prefix,
+			"region", env.s3Region)
 	}
 
 	desc := "none"
