@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 )
 
 func main() {

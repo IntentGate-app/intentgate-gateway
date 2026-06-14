@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
-	"github.com/NetGnarus/intentgate-gateway/internal/policy"
-	"github.com/NetGnarus/intentgate-gateway/internal/policystore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
+	"github.com/IntentGate-app/intentgate-gateway/internal/policystore"
 )
 
 const policyTestRego = `package intentgate.policy

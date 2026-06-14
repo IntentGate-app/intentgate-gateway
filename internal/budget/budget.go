@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 )
 
 // Store is the persistent counter backend.

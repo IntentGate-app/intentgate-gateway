@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // MemoryStore keeps audit events in a process-local bounded ring

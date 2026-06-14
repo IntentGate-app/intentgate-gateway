@@ -78,7 +78,7 @@ jobs:
             org.opencontainers.image.description=Self-hosted authorization gateway for AI agents
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.vendor=NetGnarus
+            org.opencontainers.image.vendor=IntentGate-app
 
       - name: Build and push
         id: build

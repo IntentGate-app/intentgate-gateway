@@ -51,7 +51,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // ErrClosed is returned by an emitter that has been shut down.

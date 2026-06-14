@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/mcp"
-	"github.com/NetGnarus/intentgate-gateway/internal/upstream"
+	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
+	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 )
 
 // passthroughTest spins up an upstream httptest.Server (when needed)

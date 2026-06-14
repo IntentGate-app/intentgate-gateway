@@ -106,10 +106,10 @@ Beyond these four guides:
 - **The deployment runbook** — 23-page operational guide covering production deployment (Helm), day-2 operations (monitoring, scaling, backup/restore), and incident playbooks. Available via `/contact` on [intentgate.app](https://intentgate.app/contact).
 - **API reference** — every `/v1/admin/*` endpoint with request/response shapes. Coming to `docs.intentgate.app` as the docs site comes online; in the meantime the source of truth is [`internal/handlers/`](../internal/handlers/) in this repo.
 - **The companion repos:**
-  - [`intentgate-helm`](https://github.com/NetGnarus/intentgate-helm) — Kubernetes chart deploying gateway + extractor + Postgres.
-  - [`intentgate-extractor`](https://github.com/NetGnarus/intentgate-extractor) — the intent extractor service (FastAPI + Claude Haiku, with offline stub).
-  - [`intentgate-sdk-python`](https://github.com/NetGnarus/intentgate-sdk-python) — Python SDK.
-  - [`intentgate-sdk-typescript`](https://github.com/NetGnarus/intentgate-sdk-typescript) — TypeScript SDK.
+  - [`intentgate-helm`](https://github.com/IntentGate-app/intentgate-helm) — Kubernetes chart deploying gateway + extractor + Postgres.
+  - [`intentgate-extractor`](https://github.com/IntentGate-app/intentgate-extractor) — the intent extractor service (FastAPI + Claude Haiku, with offline stub).
+  - [`intentgate-sdk-python`](https://github.com/IntentGate-app/intentgate-sdk-python) — Python SDK.
+  - [`intentgate-sdk-typescript`](https://github.com/IntentGate-app/intentgate-sdk-typescript) — TypeScript SDK.
 
 ## The four controls
 

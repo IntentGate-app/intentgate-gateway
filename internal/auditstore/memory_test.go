@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 func newTestEvent(t time.Time, decision audit.Decision, tool, agent string) audit.Event {

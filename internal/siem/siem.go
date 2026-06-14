@@ -33,7 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // Stoppable is implemented by every emitter in this package. main.go

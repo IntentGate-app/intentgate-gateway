@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/provenance"
+	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 )
 
 // HeaderIntentMemoryProvenance is the HTTP header an SDK-instrumented

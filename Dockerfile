@@ -30,11 +30,11 @@ FROM gcr.io/distroless/static:nonroot
 # Keep these in sync with the repo metadata.
 LABEL org.opencontainers.image.title="intentgate-gateway"
 LABEL org.opencontainers.image.description="Self-hosted authorization gateway for AI agents (capability + intent + policy + budget)"
-LABEL org.opencontainers.image.source="https://github.com/NetGnarus/intentgate-gateway"
-LABEL org.opencontainers.image.url="https://github.com/NetGnarus/intentgate-gateway"
-LABEL org.opencontainers.image.documentation="https://github.com/NetGnarus/intentgate-gateway#readme"
+LABEL org.opencontainers.image.source="https://github.com/IntentGate-app/intentgate-gateway"
+LABEL org.opencontainers.image.url="https://github.com/IntentGate-app/intentgate-gateway"
+LABEL org.opencontainers.image.documentation="https://github.com/IntentGate-app/intentgate-gateway#readme"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL org.opencontainers.image.vendor="NetGnarus"
+LABEL org.opencontainers.image.vendor="IntentGate-app"
 
 WORKDIR /
 COPY --from=build /out/gateway /gateway

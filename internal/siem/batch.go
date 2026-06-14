@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // flusher is the per-destination "send these events" callback.

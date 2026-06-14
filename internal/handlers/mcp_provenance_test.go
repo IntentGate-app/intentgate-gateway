@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/provenance"
+	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 )
 
 // testMaster is the master key used across handler-stage provenance

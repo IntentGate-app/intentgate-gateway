@@ -1,4 +1,4 @@
-module github.com/NetGnarus/intentgate-gateway
+module github.com/IntentGate-app/intentgate-gateway
 
 go 1.25.0
 

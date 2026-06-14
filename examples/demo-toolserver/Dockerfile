@@ -23,9 +23,9 @@ USER toolserver
 
 LABEL org.opencontainers.image.title="intentgate-demo-toolserver"
 LABEL org.opencontainers.image.description="Minimal HTTP-JSON-RPC demo upstream for IntentGate end-to-end demos"
-LABEL org.opencontainers.image.source="https://github.com/NetGnarus/intentgate-gateway"
+LABEL org.opencontainers.image.source="https://github.com/IntentGate-app/intentgate-gateway"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL org.opencontainers.image.vendor="NetGnarus"
+LABEL org.opencontainers.image.vendor="IntentGate-app"
 
 EXPOSE 8090
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
-	"github.com/NetGnarus/intentgate-gateway/internal/auditstore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 )
 
 // freshStore returns a memory store seeded with a deterministic mix of

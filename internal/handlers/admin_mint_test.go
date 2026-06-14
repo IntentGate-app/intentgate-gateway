@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
-	"github.com/NetGnarus/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 )
 
 // recEmitter captures audit events for assertions in tests.

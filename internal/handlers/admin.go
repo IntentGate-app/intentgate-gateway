@@ -14,14 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/approvals"
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
-	"github.com/NetGnarus/intentgate-gateway/internal/auditstore"
-	"github.com/NetGnarus/intentgate-gateway/internal/capability"
-	"github.com/NetGnarus/intentgate-gateway/internal/policy"
-	"github.com/NetGnarus/intentgate-gateway/internal/provenance"
-	"github.com/NetGnarus/intentgate-gateway/internal/revocation"
-	"github.com/NetGnarus/intentgate-gateway/internal/siem"
+	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
+	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
+	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 )
 
 // AdminConfig configures the admin-API handlers.

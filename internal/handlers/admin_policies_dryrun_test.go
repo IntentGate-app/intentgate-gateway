@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
-	"github.com/NetGnarus/intentgate-gateway/internal/auditstore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 )
 
 const dryRunRego = `package intentgate.policy

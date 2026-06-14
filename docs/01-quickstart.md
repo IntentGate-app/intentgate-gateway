@@ -2,7 +2,7 @@
 
 This guide gets a minimal IntentGate gateway running on your laptop in about five minutes, backed by in-memory stores. No Postgres, no Redis, no Kubernetes — just `docker run` and a curl. After this you'll have a working gateway accepting capability tokens and making decisions you can audit.
 
-The setup here is dev-mode: in-memory stores lose state on restart, the intent extractor is disabled, no metrics exposed. It's the right shape for "I want to see what this thing does." When you're ready for production, follow the deployment runbook ([request via /contact](https://intentgate.app/contact)) or the [Helm chart](https://github.com/NetGnarus/intentgate-helm) for the multi-replica path.
+The setup here is dev-mode: in-memory stores lose state on restart, the intent extractor is disabled, no metrics exposed. It's the right shape for "I want to see what this thing does." When you're ready for production, follow the deployment runbook ([request via /contact](https://intentgate.app/contact)) or the [Helm chart](https://github.com/IntentGate-app/intentgate-helm) for the multi-replica path.
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ docker run -d --name intentgate-gateway \
   -e INTENTGATE_MASTER_KEY="$MASTER_KEY" \
   -e INTENTGATE_ADMIN_TOKEN="$ADMIN_TOKEN" \
   -e INTENTGATE_REQUIRE_CAPABILITY=true \
-  ghcr.io/netgnarus/intentgate-gateway:1.6.1
+  ghcr.io/intentgate-app/intentgate-gateway:1.6.1
 ```
 
 Verify it's alive:
@@ -118,4 +118,4 @@ The single-container, in-memory setup above is fine for development. Before you 
 - **TLS termination** in front (Caddy, nginx, an ingress controller).
 - **High availability** — at least two gateway replicas behind a load balancer.
 
-The [Helm chart](https://github.com/NetGnarus/intentgate-helm) wraps all of that into one `helm install`.
+The [Helm chart](https://github.com/IntentGate-app/intentgate-helm) wraps all of that into one `helm install`.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/siem"
+	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 )
 
 // fakeReporter implements siem.StatusReporter for tests without

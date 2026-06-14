@@ -22,7 +22,7 @@ Each release artifact is:
 - Signed with [Sigstore cosign](https://github.com/sigstore/cosign) (`cosign verify` confirms provenance)
 - Accompanied by an [SBOM (SPDX 2.3)](https://spdx.dev/) and an [SLSA build provenance attestation](https://slsa.dev/)
 
-Container images are pulled from `ghcr.io/netgnarus/`; the registry enforces TLS and HTTPS-only pulls.
+Container images are pulled from `ghcr.io/intentgate-app/`; the registry enforces TLS and HTTPS-only pulls.
 
 ## Supported versions
 
@@ -40,11 +40,11 @@ We follow a standard 90-day responsible disclosure model. Earlier disclosure hap
 
 The following are explicitly out of scope for this disclosure program:
 
-- Social engineering of NetGnarus staff or customers
+- Social engineering of IntentGate-app staff or customers
 - Physical attacks on infrastructure
 - Denial-of-service / volumetric attacks (these are operational concerns, not vulnerabilities)
 - Issues in third-party dependencies — please file those with the upstream project. We track upstream advisories via Dependabot and remediate from there.
 
 ---
 
-Maintained by **NetGnarus B.V.**, Ijsselstein, The Netherlands (KvK 63319578). Commercial inquiries: <https://intentgate.app/contact>.
+Maintained by **IntentGate B.V.**, Ijsselstein, The Netherlands (KvK 63319578). Commercial inquiries: <https://intentgate.app/contact>.

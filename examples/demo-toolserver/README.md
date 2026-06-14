@@ -44,7 +44,7 @@ docker run --rm -p 8090:8090 intentgate-demo-toolserver:0.1.0
 The chart-managed path (recommended for end-to-end demos):
 
 ```sh
-helm upgrade ig oci://ghcr.io/netgnarus/charts/intentgate -n intentgate \
+helm upgrade ig oci://ghcr.io/intentgate-app/charts/intentgate -n intentgate \
   --reuse-values \
   --set demoUpstream.enabled=true
 ```
@@ -60,7 +60,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8090 &
 # In another: run the gateway against it
 docker run --rm -p 8080:8080 \
   -e INTENTGATE_UPSTREAM_URL=http://host.docker.internal:8090 \
-  ghcr.io/netgnarus/intentgate-gateway:1.5.1
+  ghcr.io/intentgate-app/intentgate-gateway:1.5.1
 ```
 
 ## What this isn't

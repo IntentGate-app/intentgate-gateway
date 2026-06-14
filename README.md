@@ -1,10 +1,10 @@
 # IntentGate Gateway
 
-[![CI](https://github.com/NetGnarus/intentgate-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/NetGnarus/intentgate-gateway/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/NetGnarus/intentgate-gateway.svg)](https://pkg.go.dev/github.com/NetGnarus/intentgate-gateway)
+[![CI](https://github.com/IntentGate-app/intentgate-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/IntentGate-app/intentgate-gateway/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/IntentGate-app/intentgate-gateway.svg)](https://pkg.go.dev/github.com/IntentGate-app/intentgate-gateway)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go 1.25](https://img.shields.io/badge/go-1.25-00ADD8.svg)](go.mod)
-[![Container](https://img.shields.io/badge/ghcr.io-intentgate--gateway-2188ff.svg)](https://github.com/NetGnarus/intentgate-gateway/pkgs/container/intentgate-gateway)
+[![Container](https://img.shields.io/badge/ghcr.io-intentgate--gateway-2188ff.svg)](https://github.com/IntentGate-app/intentgate-gateway/pkgs/container/intentgate-gateway)
 
 A self-hosted authorization gateway for AI agents.
 
@@ -37,10 +37,10 @@ inline on GitHub.
 
 | Repo | Purpose |
 | ---- | ------- |
-| [intentgate-gateway](https://github.com/NetGnarus/intentgate-gateway) | Go gateway with the four-check pipeline (this repo). |
-| [intentgate-extractor](https://github.com/NetGnarus/intentgate-extractor) | Python FastAPI service that turns a free-form prompt into a structured intent (`allowed_tools`, `forbidden_tools`, `summary`). Used by the gateway's intent check. |
-| [intentgate-sdk-python](https://github.com/NetGnarus/intentgate-sdk-python) | Python SDK for agents — three lines to call the gateway with typed exceptions per check. |
-| [intentgate-helm](https://github.com/NetGnarus/intentgate-helm) | Helm chart that deploys the gateway, extractor, and Redis to a Kubernetes cluster. |
+| [intentgate-gateway](https://github.com/IntentGate-app/intentgate-gateway) | Go gateway with the four-check pipeline (this repo). |
+| [intentgate-extractor](https://github.com/IntentGate-app/intentgate-extractor) | Python FastAPI service that turns a free-form prompt into a structured intent (`allowed_tools`, `forbidden_tools`, `summary`). Used by the gateway's intent check. |
+| [intentgate-sdk-python](https://github.com/IntentGate-app/intentgate-sdk-python) | Python SDK for agents — three lines to call the gateway with typed exceptions per check. |
+| [intentgate-helm](https://github.com/IntentGate-app/intentgate-helm) | Helm chart that deploys the gateway, extractor, and Redis to a Kubernetes cluster. |
 
 ## Status
 
@@ -52,7 +52,7 @@ The server boots and accepts requests on three endpoints:
 - `POST /v1/tool-call` — simple flat JSON shape, kept for ad-hoc curl testing.
 - `POST /v1/mcp` — JSON-RPC 2.0 / Model Context Protocol. Runs the full four-check pipeline:
   - **Capability** (Bearer token, Macaroon-style HMAC chain). Caveats are evaluated against the requested tool.
-  - **Intent.** When `X-Intent-Prompt` is supplied and an extractor is configured, the gateway calls the [extractor service](https://github.com/NetGnarus/intentgate-extractor), gets a structured intent (`allowed_tools` / `forbidden_tools`), and verifies the requested tool is permitted.
+  - **Intent.** When `X-Intent-Prompt` is supplied and an extractor is configured, the gateway calls the [extractor service](https://github.com/IntentGate-app/intentgate-extractor), gets a structured intent (`allowed_tools` / `forbidden_tools`), and verifies the requested tool is permitted.
   - **Policy.** OPA-backed Rego engine (embedded). Customer policies can express thresholds, time-of-day rules, agent-specific overrides, and arbitrary business logic. A starter policy is shipped; override via `INTENTGATE_POLICY_FILE`.
   - **Budget.** Per-token call counters via a `max_calls` caveat. Backed by Redis in production (multi-replica safe) or an in-memory store in dev.
 
@@ -152,7 +152,7 @@ Other methods return JSON-RPC `MethodNotFound` (-32601).
 
 ## Use it from an agent
 
-The [Python SDK](https://github.com/NetGnarus/intentgate-sdk-python)
+The [Python SDK](https://github.com/IntentGate-app/intentgate-sdk-python)
 hides the HTTP plumbing and turns each check failure into a typed
 exception:
 
@@ -217,8 +217,8 @@ runs as a non-root user.
 Pull the official multi-arch image (linux/amd64, linux/arm64) from GHCR:
 
 ```sh
-docker pull ghcr.io/netgnarus/intentgate-gateway:latest
-docker run --rm -p 8080:8080 ghcr.io/netgnarus/intentgate-gateway:latest
+docker pull ghcr.io/intentgate-app/intentgate-gateway:latest
+docker run --rm -p 8080:8080 ghcr.io/intentgate-app/intentgate-gateway:latest
 ```
 
 Tagged images (`:v0.1.0`, `:v0.1`, `:0.1.0`) are published automatically
@@ -530,8 +530,8 @@ agent at the gateway, and exercise the full four-check pipeline.
 - [x] Embedded OPA policy evaluation
 - [x] Budget enforcement (Redis-backed)
 - [x] Audit log emission (OCSF-lite JSON to stdout)
-- [x] Python SDK ([intentgate-sdk-python](https://github.com/NetGnarus/intentgate-sdk-python))
-- [x] Helm chart ([intentgate-helm](https://github.com/NetGnarus/intentgate-helm))
+- [x] Python SDK ([intentgate-sdk-python](https://github.com/IntentGate-app/intentgate-sdk-python))
+- [x] Helm chart ([intentgate-helm](https://github.com/IntentGate-app/intentgate-helm))
 
 **v0.1 → v1.0 — next.** Production hardening based on design-partner
 deployments.

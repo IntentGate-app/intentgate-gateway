@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // SentinelConfig configures a Microsoft Sentinel (Azure Monitor Logs)

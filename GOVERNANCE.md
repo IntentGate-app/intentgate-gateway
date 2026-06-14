@@ -16,12 +16,12 @@ The components listed below remain Apache 2.0 in perpetuity. IntentGate B.V. wil
 
 | Repository | What it provides |
 | --- | --- |
-| [`intentgate-gateway`](https://github.com/NetGnarus/intentgate-gateway) | The authorization control point. Four-check pipeline (capability, intent, policy, budget), capability token issuance and attenuation, multi-tenant scoping, tamper-evident audit chain, audit query / export / verify endpoints, webhook emitter, SIEM forwarders. |
-| [`intentgate-extractor`](https://github.com/NetGnarus/intentgate-extractor) | Intent classifier microservice. Stub backend (heuristic) and Anthropic backend (Claude Haiku). |
-| [`intentgate-sdk-python`](https://github.com/NetGnarus/intentgate-sdk-python) | Agent-side SDK. Capability attenuation, transport, typed client. |
-| [`intentgate-sdk-typescript`](https://github.com/NetGnarus/intentgate-sdk-typescript) | Agent-side SDK for Node 18+. Byte-compatible attenuation with the Python SDK. |
-| [`intentgate-helm`](https://github.com/NetGnarus/intentgate-helm) | Kubernetes packaging. Gateway + extractor in one chart. |
-| [`intentgate-console`](https://github.com/NetGnarus/intentgate-console) | Basic operator UI. Full token lifecycle (mint, revoke, audit query), live `/metrics` dashboard. |
+| [`intentgate-gateway`](https://github.com/IntentGate-app/intentgate-gateway) | The authorization control point. Four-check pipeline (capability, intent, policy, budget), capability token issuance and attenuation, multi-tenant scoping, tamper-evident audit chain, audit query / export / verify endpoints, webhook emitter, SIEM forwarders. |
+| [`intentgate-extractor`](https://github.com/IntentGate-app/intentgate-extractor) | Intent classifier microservice. Stub backend (heuristic) and Anthropic backend (Claude Haiku). |
+| [`intentgate-sdk-python`](https://github.com/IntentGate-app/intentgate-sdk-python) | Agent-side SDK. Capability attenuation, transport, typed client. |
+| [`intentgate-sdk-typescript`](https://github.com/IntentGate-app/intentgate-sdk-typescript) | Agent-side SDK for Node 18+. Byte-compatible attenuation with the Python SDK. |
+| [`intentgate-helm`](https://github.com/IntentGate-app/intentgate-helm) | Kubernetes packaging. Gateway + extractor in one chart. |
+| [`intentgate-console`](https://github.com/IntentGate-app/intentgate-console) | Basic operator UI. Full token lifecycle (mint, revoke, audit query), live `/metrics` dashboard. |
 
 These repositories are sufficient to deploy IntentGate as a complete authorization control point for AI agents.
 

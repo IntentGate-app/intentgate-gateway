@@ -121,7 +121,7 @@ the textbook "swap data, keep HMAC" attack.
 
 ## SDK side
 
-Both `@netgnarus/intentgate` (TypeScript, `sdk-typescript/src/memory.ts`)
+Both `@intentgate-app/intentgate` (TypeScript, `sdk-typescript/src/memory.ts`)
 and `intentgate` (Python, `sdk-python/src/intentgate/memory.py`) expose
 a `MemoryStore` class with the same shape:
 
@@ -149,7 +149,7 @@ constructor takes the decoded bytes.
 - **The lab demo card constructs envelopes inline rather than going
   through the SDK** (`console-pro/lib/lab-attacks/scenarios.ts` →
   `signProvenanceEnvelope`). This is intentional — console-pro
-  doesn't take a runtime dep on `@netgnarus/intentgate`. If we ever
+  doesn't take a runtime dep on `@intentgate-app/intentgate`. If we ever
   add the SDK as a dep we should refactor the lab card to use it for
   consistency.
 - **No "tool requires provenance" rule yet in baseline.rego.** A

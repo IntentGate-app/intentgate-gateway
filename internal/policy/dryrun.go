@@ -58,7 +58,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // DryRunOptions tunes a [DryRun] call.

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/approvals"
+	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 )
 
 func newApprovalsHandler(t *testing.T) (http.Handler, http.Handler, approvals.Store) {

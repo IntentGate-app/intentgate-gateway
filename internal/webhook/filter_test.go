@@ -3,7 +3,7 @@ package webhook
 import (
 	"testing"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // --- DefaultFilter: which audit events become webhooks ----------

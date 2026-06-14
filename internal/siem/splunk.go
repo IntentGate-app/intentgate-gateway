@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // SplunkConfig configures a Splunk HTTP Event Collector emitter.

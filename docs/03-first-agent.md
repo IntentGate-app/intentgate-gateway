@@ -13,10 +13,10 @@ pip install intentgate
 The package is on PyPI. If you want to install the development tip:
 
 ```sh
-pip install git+https://github.com/NetGnarus/intentgate-sdk-python.git
+pip install git+https://github.com/IntentGate-app/intentgate-sdk-python.git
 ```
 
-There's a [TypeScript SDK](https://github.com/NetGnarus/intentgate-sdk-typescript) with byte-compatible token semantics — same patterns, same exception hierarchy under different names. If your agent is in Node.js, install `@netgnarus/intentgate` instead and follow the same flow.
+There's a [TypeScript SDK](https://github.com/IntentGate-app/intentgate-sdk-typescript) with byte-compatible token semantics — same patterns, same exception hierarchy under different names. If your agent is in Node.js, install `@intentgate-app/intentgate` instead and follow the same flow.
 
 ## Mint a token
 
@@ -182,4 +182,4 @@ If you want a non-stub upstream that returns real fixture data — invoices, cus
 - **Tune your policy.** As you watch real agent traffic, you'll see calls that should have been blocked but weren't (or vice versa). [Guide 02](./02-first-policy.md) walks through writing and dry-running Rego changes.
 - **Hook your control plane.** The SDK's exception classes match the gateway's audit event categories — if you wire `PolicyError` (with `escalated=True`) to your existing approval workflow, you get the human-in-the-loop story for free without your agent code ever knowing about the approval queue.
 
-Full SDK reference (every method, every parameter, async variants, advanced patterns) lives in the [SDK README](https://github.com/NetGnarus/intentgate-sdk-python).
+Full SDK reference (every method, every parameter, async variants, advanced patterns) lives in the [SDK README](https://github.com/IntentGate-app/intentgate-sdk-python).

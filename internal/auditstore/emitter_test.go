@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // fakeStore counts inserts and optionally injects an error/delay.

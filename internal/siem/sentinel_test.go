@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NetGnarus/intentgate-gateway/internal/audit"
+	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 )
 
 // dual returns a (auth-server, ingest-server) pair. Auth issues a

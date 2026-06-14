@@ -53,11 +53,11 @@ data:
     # paste the contents of grafana/intentgate-gateway.json here
 ```
 
-The official IntentGate Helm chart at [`intentgate-helm`](https://github.com/NetGnarus/intentgate-helm) ships this ConfigMap by default when `dashboards.enabled=true` (set in `values.yaml`); turn it off for clusters that don't run a Grafana auto-discovery sidecar.
+The official IntentGate Helm chart at [`intentgate-helm`](https://github.com/IntentGate-app/intentgate-helm) ships this ConfigMap by default when `dashboards.enabled=true` (set in `values.yaml`); turn it off for clusters that don't run a Grafana auto-discovery sidecar.
 
 ### Local kicking-the-tires
 
-The fastest way to see the dashboard against live traffic is the IntentGate demo lab — clone [`intentgate-lab`](https://github.com/NetGnarus/intentgate-lab) and run `./demo.sh`. Beat 12 generates traffic and pops the dashboard open. No Kubernetes needed.
+The fastest way to see the dashboard against live traffic is the IntentGate demo lab — clone [`intentgate-lab`](https://github.com/IntentGate-app/intentgate-lab) and run `./demo.sh`. Beat 12 generates traffic and pops the dashboard open. No Kubernetes needed.
 
 ## Panel reference
 
