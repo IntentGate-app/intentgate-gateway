@@ -263,6 +263,15 @@ func New(cfg Config) *http.Server {
 			// from the store; caps at exportMaxRows. Same auth +
 			// tenant scoping as /v1/admin/audit.
 			mux.Handle("GET /v1/admin/audit/export", handlers.NewAdminAuditExportHandler(adminCfg))
+			// Observed-agents discovery (OSS). Aggregates audit events
+			// into the set of agents seen, the tools each calls, and
+			// derived risk signals — "what AI is running and what does
+			// it touch." The OSS console renders this read-only as the
+			// adoption hook; Pro console-pro reads the same endpoint and
+			// enriches each agent with ownership + governance state.
+			// Audit-store-gated because discovery is built from observed
+			// traffic; no persistence, no discovery.
+			mux.Handle("GET /v1/admin/agents", handlers.NewAdminAgentsHandler(adminCfg))
 			// Dry-run policy authoring requires the audit store too —
 			// without persistence there's no historical traffic to
 			// replay the candidate Rego against. Older deployments
