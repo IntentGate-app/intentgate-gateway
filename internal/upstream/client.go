@@ -57,6 +57,13 @@ type Config struct {
 	// Timeout caps end-to-end forward duration (connection + request +
 	// response read). Zero or negative selects [DefaultTimeout].
 	Timeout time.Duration
+	// Headers are injected on every forwarded request — this is how the
+	// gateway brokers the upstream credential. The agent authenticates
+	// to the gateway with a capability token; the gateway then attaches
+	// the tool server's real credential here, so the agent never holds
+	// the upstream secret. Typically a single "Authorization" entry.
+	// Values are sent verbatim and are never written to the audit log.
+	Headers map[string]string
 	// HTTPClient is the underlying client. Optional; one is constructed
 	// from Timeout when nil. Tests inject a custom client to point at an
 	// httptest.Server.
@@ -67,8 +74,9 @@ type Config struct {
 //
 // Client is safe for concurrent use.
 type Client struct {
-	url  string
-	http *http.Client
+	url     string
+	http    *http.Client
+	headers map[string]string
 }
 
 // New constructs a Client. Returns an error when cfg.URL is empty or
@@ -96,7 +104,16 @@ func New(cfg Config) (*Client, error) {
 		}
 		httpClient = &http.Client{Timeout: timeout}
 	}
-	return &Client{url: cfg.URL, http: httpClient}, nil
+	// Copy the header map so a caller mutating theirs after New can't
+	// change what we inject at request time.
+	var headers map[string]string
+	if len(cfg.Headers) > 0 {
+		headers = make(map[string]string, len(cfg.Headers))
+		for k, v := range cfg.Headers {
+			headers[k] = v
+		}
+	}
+	return &Client{url: cfg.URL, http: httpClient, headers: headers}, nil
 }
 
 // Response is the raw upstream reply.
@@ -123,6 +140,12 @@ func (c *Client) Forward(ctx context.Context, body []byte) (*Response, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// Broker the upstream credential: inject the gateway-held headers
+	// (e.g. Authorization) onto the outbound request. Set after the
+	// defaults so an operator-supplied Content-Type/Accept can override.
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

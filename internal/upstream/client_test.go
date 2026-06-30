@@ -71,6 +71,39 @@ func TestForward_HappyPath(t *testing.T) {
 	}
 }
 
+// Credential brokering: the gateway-held headers are injected on the
+// forwarded request (so the agent never holds the upstream secret),
+// while the agent's request body is forwarded byte-for-byte unchanged.
+func TestForward_InjectsBrokeredCredential(t *testing.T) {
+	var gotAuth, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleSuccessResponse))
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{
+		URL:     srv.URL,
+		Headers: map[string]string{"Authorization": "Bearer upstream-secret-xyz"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := c.Forward(context.Background(), []byte(sampleRequest)); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if gotAuth != "Bearer upstream-secret-xyz" {
+		t.Errorf("brokered credential not injected: Authorization=%q", gotAuth)
+	}
+	if gotBody != sampleRequest {
+		t.Errorf("agent body must pass through unchanged:\n got: %s\nwant: %s", gotBody, sampleRequest)
+	}
+}
+
 // A 200 carrying a JSON-RPC error object is NOT a transport-level
 // failure — the upstream answered, the answer just says no. The body
 // is returned to the caller for pass-through.

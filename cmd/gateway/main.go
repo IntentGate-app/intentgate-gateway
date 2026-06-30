@@ -98,6 +98,12 @@
 //	                                checks (useful for SDK tests, smokes).
 //	INTENTGATE_UPSTREAM_TIMEOUT_MS  per-call upstream timeout in
 //	                                milliseconds. Default 30000.
+//	INTENTGATE_UPSTREAM_AUTH_HEADER credential brokering: the real tool-
+//	                                server credential as "Header-Name: value"
+//	                                (e.g. "Authorization: Bearer sk-..."),
+//	                                injected by the gateway on every
+//	                                forwarded call so agents never hold the
+//	                                upstream secret. Unset = none injected.
 //	INTENTGATE_POSTGRES_URL         libpq-style DSN for a Postgres-backed
 //	                                revocation store, e.g.
 //	                                "postgres://user:pass@host:5432/db".
@@ -265,6 +271,7 @@ func main() {
 	tenantAdminsRaw := envOr("INTENTGATE_TENANT_ADMINS", "")
 	upstreamURL := envOr("INTENTGATE_UPSTREAM_URL", "")
 	upstreamTimeoutMS := envOr("INTENTGATE_UPSTREAM_TIMEOUT_MS", "")
+	upstreamAuthHeader := envOr("INTENTGATE_UPSTREAM_AUTH_HEADER", "")
 	postgresURL := envOr("INTENTGATE_POSTGRES_URL", "")
 	adminToken := envOr("INTENTGATE_ADMIN_TOKEN", "")
 	metricsEnabled := envOr("INTENTGATE_METRICS_ENABLED", "") == "true"
@@ -502,7 +509,7 @@ func main() {
 		}
 	}()
 
-	upstreamClient, upstreamDesc, err := loadUpstream(logger, upstreamURL, upstreamTimeoutMS)
+	upstreamClient, upstreamDesc, err := loadUpstream(logger, upstreamURL, upstreamTimeoutMS, upstreamAuthHeader)
 	if err != nil {
 		logger.Error("failed to configure upstream", "err", err)
 		os.Exit(1)
@@ -839,7 +846,7 @@ func parseKVList(s string) map[string]string {
 // at startup so a misconfigured deployment fails fast, and the
 // human-readable description used in the startup log line includes the
 // URL and timeout for operator visibility.
-func loadUpstream(logger *slog.Logger, url, timeoutMS string) (*upstream.Client, string, error) {
+func loadUpstream(logger *slog.Logger, url, timeoutMS, authHeader string) (*upstream.Client, string, error) {
 	if url == "" {
 		logger.Info("upstream not configured: returning stub allow for authorized calls",
 			"hint", "set INTENTGATE_UPSTREAM_URL to forward to a real MCP tool server")
@@ -858,11 +865,31 @@ func loadUpstream(logger *slog.Logger, url, timeoutMS string) (*upstream.Client,
 		timeout = time.Duration(ms) * time.Millisecond
 	}
 
-	c, err := upstream.New(upstream.Config{URL: url, Timeout: timeout})
+	// Credential brokering: INTENTGATE_UPSTREAM_AUTH_HEADER holds the
+	// real tool-server credential as "Header-Name: value" (e.g.
+	// "Authorization: Bearer sk-..."). The gateway injects it on every
+	// forwarded call so agents authenticate to the gateway with a
+	// capability token and never possess the upstream secret.
+	var headers map[string]string
+	brokered := ""
+	if h := strings.TrimSpace(authHeader); h != "" {
+		name, value, ok := strings.Cut(h, ":")
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if !ok || name == "" || value == "" {
+			return nil, "", fmt.Errorf(`INTENTGATE_UPSTREAM_AUTH_HEADER must be "Header-Name: value"`)
+		}
+		headers = map[string]string{name: value}
+		brokered = ", credential brokered via " + name
+		// Log the header NAME only — never the secret value.
+		logger.Info("upstream credential brokering enabled", "header", name)
+	}
+
+	c, err := upstream.New(upstream.Config{URL: url, Timeout: timeout, Headers: headers})
 	if err != nil {
 		return nil, "", err
 	}
-	return c, fmt.Sprintf("%s (timeout %s)", url, timeout), nil
+	return c, fmt.Sprintf("%s (timeout %s%s)", url, timeout, brokered), nil
 }
 
 // loadTracing initializes the OpenTelemetry tracer provider when an
