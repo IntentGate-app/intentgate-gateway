@@ -18,6 +18,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
@@ -68,6 +69,10 @@ type AdminConfig struct {
 	// Approvals is the queue the /v1/admin/approvals endpoints read
 	// from. nil disables those routes (they're not registered).
 	Approvals approvals.Store
+	// Credentials is the per-tool upstream credential store managed by
+	// the /v1/admin/upstream-credentials endpoints. nil disables those
+	// routes (per-tool brokering is env-only or off).
+	Credentials *credentials.Store
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.

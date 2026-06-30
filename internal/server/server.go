@@ -242,8 +242,16 @@ func New(cfg Config) *http.Server {
 			MasterKey:    cfg.MasterKey,
 			Revocation:   cfg.Revocation,
 			Audit:        cfg.Audit,
+			Credentials:  cfg.Credentials,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
+		// Per-tool upstream credential brokering (console-managed). Only
+		// registered when a durable credential store is wired in.
+		if cfg.Credentials != nil {
+			mux.Handle("GET /v1/admin/upstream-credentials", handlers.NewAdminCredentialsListHandler(adminCfg))
+			mux.Handle("POST /v1/admin/upstream-credentials", handlers.NewAdminCredentialsSetHandler(adminCfg))
+			mux.Handle("DELETE /v1/admin/upstream-credentials/{tool}", handlers.NewAdminCredentialsDeleteHandler(adminCfg))
+		}
 		mux.Handle("GET /v1/admin/revocations", handlers.NewAdminRevocationsListHandler(adminCfg))
 		mux.Handle("POST /v1/admin/mint", handlers.NewAdminMintHandler(adminCfg))
 		// Tenants list — surfaces configured per-tenant admin scopes so

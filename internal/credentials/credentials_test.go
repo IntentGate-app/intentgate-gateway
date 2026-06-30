@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -34,9 +35,10 @@ func TestNew_RejectsBadHeader(t *testing.T) {
 }
 
 func TestSetRotatesAndRemoveFallsBack(t *testing.T) {
+	ctx := context.Background()
 	s, _ := New(nil)
 
-	if err := s.Set("send_email", "Authorization: Bearer v1"); err != nil {
+	if err := s.Set(ctx, "send_email", "Authorization: Bearer v1"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	if got := s.HeaderFor("send_email")["Authorization"]; got != "Bearer v1" {
@@ -44,14 +46,16 @@ func TestSetRotatesAndRemoveFallsBack(t *testing.T) {
 	}
 
 	// Rotation: a new value for the same tool replaces the old one live.
-	if err := s.Set("send_email", "Authorization: Bearer v2"); err != nil {
+	if err := s.Set(ctx, "send_email", "Authorization: Bearer v2"); err != nil {
 		t.Fatalf("Set rotate: %v", err)
 	}
 	if got := s.HeaderFor("send_email")["Authorization"]; got != "Bearer v2" {
 		t.Errorf("after rotate, want Bearer v2, got %q", got)
 	}
 
-	s.Remove("send_email")
+	if err := s.Remove(ctx, "send_email"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
 	if got := s.HeaderFor("send_email"); got != nil {
 		t.Errorf("after Remove, want nil (fall back to global), got %v", got)
 	}

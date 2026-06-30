@@ -110,7 +110,16 @@
 //	                                e.g. {"transfer_funds":"Authorization:
 //	                                Bearer sk-pay"}. Each tool's call gets
 //	                                its own credential; tools without an
-//	                                entry use the global header above.
+//	                                entry use the global header above. With
+//	                                INTENTGATE_POSTGRES_URL set, per-tool
+//	                                credentials become console-managed and
+//	                                encrypted at rest (this env only seeds
+//	                                first boot).
+//	INTENTGATE_CREDENTIAL_ENCRYPTION_KEY
+//	                                32-byte AES key (64 hex chars) used to
+//	                                encrypt per-tool credentials at rest.
+//	                                Optional — derived from the master key
+//	                                when unset.
 //	INTENTGATE_POSTGRES_URL         libpq-style DSN for a Postgres-backed
 //	                                revocation store, e.g.
 //	                                "postgres://user:pass@host:5432/db".
@@ -135,7 +144,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -282,6 +293,7 @@ func main() {
 	upstreamTimeoutMS := envOr("INTENTGATE_UPSTREAM_TIMEOUT_MS", "")
 	upstreamAuthHeader := envOr("INTENTGATE_UPSTREAM_AUTH_HEADER", "")
 	upstreamToolCreds := envOr("INTENTGATE_UPSTREAM_TOOL_CREDENTIALS", "")
+	credEncKeyHex := envOr("INTENTGATE_CREDENTIAL_ENCRYPTION_KEY", "")
 	postgresURL := envOr("INTENTGATE_POSTGRES_URL", "")
 	adminToken := envOr("INTENTGATE_ADMIN_TOKEN", "")
 	metricsEnabled := envOr("INTENTGATE_METRICS_ENABLED", "") == "true"
@@ -519,11 +531,12 @@ func main() {
 		}
 	}()
 
-	credStore, err := loadCredentials(logger, upstreamToolCreds)
+	credStore, err := loadCredentials(context.Background(), logger, upstreamToolCreds, postgresURL, credEncKeyHex, masterKey)
 	if err != nil {
 		logger.Error("failed to configure per-tool credentials", "err", err)
 		os.Exit(1)
 	}
+	defer credStore.Close()
 
 	upstreamClient, upstreamDesc, err := loadUpstream(logger, upstreamURL, upstreamTimeoutMS, upstreamAuthHeader)
 	if err != nil {
@@ -600,6 +613,24 @@ func main() {
 	defer cancelWatch()
 	if policyStore != nil {
 		go watchAndReloadPolicy(watchCtx, logger, policyStore, policyReloader, startupDraftIDs)
+	}
+	// Refresh per-tool credentials from Postgres on a timer so a change
+	// made via the console on one replica propagates to the others.
+	if credStore != nil {
+		go func() {
+			t := time.NewTicker(20 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-t.C:
+					if rErr := credStore.Reload(watchCtx); rErr != nil {
+						logger.Warn("per-tool credential reload failed", "err", rErr)
+					}
+				}
+			}
+		}()
 	}
 
 	adminTokenDesc := "disabled"
@@ -918,20 +949,67 @@ func loadUpstream(logger *slog.Logger, url, timeoutMS, authHeader string) (*upst
 // The gateway injects the matching credential per tool; tools without
 // an entry fall back to the global INTENTGATE_UPSTREAM_AUTH_HEADER.
 // Returns (nil, nil) when unset — per-tool brokering is simply off.
-func loadCredentials(logger *slog.Logger, raw string) (*credentials.Store, error) {
-	if strings.TrimSpace(raw) == "" {
+func loadCredentials(ctx context.Context, logger *slog.Logger, raw, postgresURL, encKeyHex string, masterKey []byte) (*credentials.Store, error) {
+	seed := map[string]string{}
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &seed); err != nil {
+			return nil, fmt.Errorf(`INTENTGATE_UPSTREAM_TOOL_CREDENTIALS must be a JSON object of tool -> "Header: value": %w`, err)
+		}
+	}
+
+	// Durable, console-managed store when Postgres is configured: the
+	// per-tool secrets are encrypted at rest and editable at runtime via
+	// the admin API (the console). Env entries seed first-boot only.
+	if strings.TrimSpace(postgresURL) != "" {
+		key, err := credentialEncryptionKey(encKeyHex, masterKey)
+		if err != nil {
+			return nil, err
+		}
+		db, err := credentials.NewPostgresStore(ctx, postgresURL, key)
+		if err != nil {
+			return nil, err
+		}
+		store, err := credentials.NewPostgres(ctx, db, seed)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		logger.Info("per-tool credential brokering enabled (console-managed, encrypted in Postgres)",
+			"tools", store.Tools())
+		return store, nil
+	}
+
+	// In-memory, env-configured store (no Postgres): per-tool secrets
+	// from INTENTGATE_UPSTREAM_TOOL_CREDENTIALS, no runtime management.
+	if len(seed) == 0 {
 		return nil, nil
 	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return nil, fmt.Errorf(`INTENTGATE_UPSTREAM_TOOL_CREDENTIALS must be a JSON object of tool -> "Header: value": %w`, err)
-	}
-	store, err := credentials.New(m)
+	store, err := credentials.New(seed)
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("per-tool credential brokering enabled", "tools", store.Tools())
+	logger.Info("per-tool credential brokering enabled (env-configured)", "tools", store.Tools())
 	return store, nil
+}
+
+// credentialEncryptionKey returns the 32-byte AES-256 key used to
+// encrypt per-tool credentials at rest. Operators may set a dedicated
+// INTENTGATE_CREDENTIAL_ENCRYPTION_KEY (64 hex chars); otherwise the key
+// is derived from the gateway master key so it works without an extra
+// secret.
+func credentialEncryptionKey(hexKey string, masterKey []byte) ([]byte, error) {
+	if h := strings.TrimSpace(hexKey); h != "" {
+		key, err := hex.DecodeString(h)
+		if err != nil {
+			return nil, fmt.Errorf("INTENTGATE_CREDENTIAL_ENCRYPTION_KEY: %w", err)
+		}
+		if len(key) != 32 {
+			return nil, fmt.Errorf("INTENTGATE_CREDENTIAL_ENCRYPTION_KEY must be 32 bytes (64 hex chars), got %d", len(key))
+		}
+		return key, nil
+	}
+	sum := sha256.Sum256(masterKey)
+	return sum[:], nil
 }
 
 // loadTracing initializes the OpenTelemetry tracer provider when an
