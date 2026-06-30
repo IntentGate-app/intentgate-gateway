@@ -104,6 +104,13 @@
 //	                                injected by the gateway on every
 //	                                forwarded call so agents never hold the
 //	                                upstream secret. Unset = none injected.
+//	INTENTGATE_UPSTREAM_TOOL_CREDENTIALS
+//	                                per-tool credential brokering: a JSON
+//	                                object mapping tool -> "Header: value",
+//	                                e.g. {"transfer_funds":"Authorization:
+//	                                Bearer sk-pay"}. Each tool's call gets
+//	                                its own credential; tools without an
+//	                                entry use the global header above.
 //	INTENTGATE_POSTGRES_URL         libpq-style DSN for a Postgres-backed
 //	                                revocation store, e.g.
 //	                                "postgres://user:pass@host:5432/db".
@@ -129,6 +136,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -145,6 +153,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
@@ -272,6 +281,7 @@ func main() {
 	upstreamURL := envOr("INTENTGATE_UPSTREAM_URL", "")
 	upstreamTimeoutMS := envOr("INTENTGATE_UPSTREAM_TIMEOUT_MS", "")
 	upstreamAuthHeader := envOr("INTENTGATE_UPSTREAM_AUTH_HEADER", "")
+	upstreamToolCreds := envOr("INTENTGATE_UPSTREAM_TOOL_CREDENTIALS", "")
 	postgresURL := envOr("INTENTGATE_POSTGRES_URL", "")
 	adminToken := envOr("INTENTGATE_ADMIN_TOKEN", "")
 	metricsEnabled := envOr("INTENTGATE_METRICS_ENABLED", "") == "true"
@@ -509,6 +519,12 @@ func main() {
 		}
 	}()
 
+	credStore, err := loadCredentials(logger, upstreamToolCreds)
+	if err != nil {
+		logger.Error("failed to configure per-tool credentials", "err", err)
+		os.Exit(1)
+	}
+
 	upstreamClient, upstreamDesc, err := loadUpstream(logger, upstreamURL, upstreamTimeoutMS, upstreamAuthHeader)
 	if err != nil {
 		logger.Error("failed to configure upstream", "err", err)
@@ -651,6 +667,7 @@ func main() {
 		AuditStore:            auditStore,
 		SIEMReporters:         siemReporters,
 		Upstream:              upstreamClient,
+		Credentials:           credStore,
 		Revocation:            revocationStore,
 		Approvals:             approvalsStore,
 		ApprovalTimeout:       approvalTimeout,
@@ -890,6 +907,31 @@ func loadUpstream(logger *slog.Logger, url, timeoutMS, authHeader string) (*upst
 		return nil, "", err
 	}
 	return c, fmt.Sprintf("%s (timeout %s%s)", url, timeout, brokered), nil
+}
+
+// loadCredentials builds the per-tool credential store from
+// INTENTGATE_UPSTREAM_TOOL_CREDENTIALS — a JSON object mapping a tool
+// name to its upstream credential as "Header-Name: value", e.g.
+//
+//	{"transfer_funds":"Authorization: Bearer sk-pay","read_invoice":"X-Api-Key: abc"}
+//
+// The gateway injects the matching credential per tool; tools without
+// an entry fall back to the global INTENTGATE_UPSTREAM_AUTH_HEADER.
+// Returns (nil, nil) when unset — per-tool brokering is simply off.
+func loadCredentials(logger *slog.Logger, raw string) (*credentials.Store, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, fmt.Errorf(`INTENTGATE_UPSTREAM_TOOL_CREDENTIALS must be a JSON object of tool -> "Header: value": %w`, err)
+	}
+	store, err := credentials.New(m)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("per-tool credential brokering enabled", "tools", store.Tools())
+	return store, nil
 }
 
 // loadTracing initializes the OpenTelemetry tracer provider when an

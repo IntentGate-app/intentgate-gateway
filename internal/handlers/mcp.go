@@ -15,6 +15,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
@@ -70,6 +71,12 @@ type MCPHandlerConfig struct {
 	// (useful for SDK tests, smoke targets, and any deployment that
 	// hasn't wired a real upstream yet).
 	Upstream *upstream.Client
+	// Credentials brokers per-tool upstream secrets: the handler looks
+	// up the credential for the tool being called and injects it on the
+	// forwarded request, so agents never hold any tool secret. Tools
+	// without a per-tool entry fall back to the global upstream
+	// credential. nil disables per-tool brokering (global only).
+	Credentials *credentials.Store
 	// Revocation is the store the capability check consults to reject
 	// tokens revoked after issuance. When nil, the revocation step is
 	// skipped (useful for tests and minimal dev installs). Production
@@ -562,7 +569,9 @@ func (h *mcpHandler) forwardToUpstream(
 		}
 	}
 	upStart := time.Now()
-	upResp, err := h.cfg.Upstream.Forward(ctx, body)
+	// Per-tool credential brokering: inject this tool's upstream secret
+	// (falls back to the global credential when no per-tool entry).
+	upResp, err := h.cfg.Upstream.Forward(ctx, body, h.cfg.Credentials.HeaderFor(params.Name))
 	upDur := time.Since(upStart)
 	// Record outcome on the breaker/bulkhead. Status < 500 and no
 	// transport error counts as a success; everything else as a
@@ -791,7 +800,9 @@ func (h *mcpHandler) forwardToUpstream(
 // signal-to-noise for SOC analysts).
 func (h *mcpHandler) handlePassthrough(ctx context.Context, req *mcp.Request, body []byte) *mcp.Response {
 	if h.cfg.Upstream != nil {
-		upResp, err := h.cfg.Upstream.Forward(ctx, body)
+		// Handshake passthrough (tools/list, ping) — no specific tool, so
+		// only the global upstream credential applies (nil per-tool).
+		upResp, err := h.cfg.Upstream.Forward(ctx, body, nil)
 		if err != nil {
 			var uerr *upstream.Error
 			if errors.As(err, &uerr) {

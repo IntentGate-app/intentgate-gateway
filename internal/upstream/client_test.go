@@ -59,7 +59,7 @@ func TestForward_HappyPath(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	resp, err := c.Forward(context.Background(), []byte(sampleRequest))
+	resp, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err != nil {
 		t.Fatalf("Forward: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestForward_InjectsBrokeredCredential(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if _, err := c.Forward(context.Background(), []byte(sampleRequest)); err != nil {
+	if _, err := c.Forward(context.Background(), []byte(sampleRequest), nil); err != nil {
 		t.Fatalf("Forward: %v", err)
 	}
 	if gotAuth != "Bearer upstream-secret-xyz" {
@@ -101,6 +101,35 @@ func TestForward_InjectsBrokeredCredential(t *testing.T) {
 	}
 	if gotBody != sampleRequest {
 		t.Errorf("agent body must pass through unchanged:\n got: %s\nwant: %s", gotBody, sampleRequest)
+	}
+}
+
+// Per-tool credential brokering: the per-call extra header overrides
+// the client's global credential for that specific call.
+func TestForward_PerToolHeaderOverridesGlobal(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleSuccessResponse))
+	}))
+	defer srv.Close()
+
+	c, err := New(Config{
+		URL:     srv.URL,
+		Headers: map[string]string{"Authorization": "Bearer GLOBAL"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A tool with its own credential passes it as extra → it wins.
+	if _, err := c.Forward(context.Background(), []byte(sampleRequest),
+		map[string]string{"Authorization": "Bearer PER-TOOL"}); err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if gotAuth != "Bearer PER-TOOL" {
+		t.Errorf("per-tool credential should override global: got %q", gotAuth)
 	}
 }
 
@@ -115,7 +144,7 @@ func TestForward_UpstreamJSONRPCErrorIsNotAFailure(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{URL: srv.URL})
-	resp, err := c.Forward(context.Background(), []byte(sampleRequest))
+	resp, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err != nil {
 		t.Fatalf("Forward unexpectedly errored: %v", err)
 	}
@@ -132,7 +161,7 @@ func TestForward_NonOK_Returns_ErrUpstreamHTTP(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{URL: srv.URL})
-	_, err := c.Forward(context.Background(), []byte(sampleRequest))
+	_, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -158,7 +187,7 @@ func TestForward_Timeout(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{URL: srv.URL, Timeout: 30 * time.Millisecond})
-	_, err := c.Forward(context.Background(), []byte(sampleRequest))
+	_, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -182,7 +211,7 @@ func TestForward_ContextDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 
-	_, err := c.Forward(ctx, []byte(sampleRequest))
+	_, err := c.Forward(ctx, []byte(sampleRequest), nil)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -212,7 +241,7 @@ func TestForward_TransportError(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{URL: srv.URL, Timeout: 1 * time.Second})
-	_, err := c.Forward(context.Background(), []byte(sampleRequest))
+	_, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -234,7 +263,7 @@ func TestForward_OversizedBody(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{URL: srv.URL})
-	_, err := c.Forward(context.Background(), []byte(sampleRequest))
+	_, err := c.Forward(context.Background(), []byte(sampleRequest), nil)
 	if err == nil {
 		t.Fatal("expected oversized-body error, got nil")
 	}

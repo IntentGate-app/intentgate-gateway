@@ -11,6 +11,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
+	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/handlers"
@@ -85,6 +86,11 @@ type Config struct {
 	// no upstream is configured and the gateway returns its stub allow
 	// for authorized calls. Production deployments always supply one.
 	Upstream *upstream.Client
+	// Credentials brokers per-tool upstream secrets (the gateway injects
+	// the tool's credential on the forwarded call so agents never hold
+	// it). nil means per-tool brokering is off; the global upstream
+	// credential still applies.
+	Credentials *credentials.Store
 	// Revocation is the store the capability check consults to reject
 	// tokens revoked after issuance. nil means the revocation step is
 	// skipped (dev convenience). Production supplies a real store.
@@ -204,6 +210,7 @@ func New(cfg Config) *http.Server {
 		RequireBudget:     cfg.RequireBudget,
 		Audit:             cfg.Audit,
 		Upstream:          cfg.Upstream,
+		Credentials:       cfg.Credentials,
 		Revocation:        cfg.Revocation,
 		Metrics:           cfg.Metrics,
 		Approvals:         cfg.Approvals,

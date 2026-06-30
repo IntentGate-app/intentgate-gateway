@@ -133,17 +133,27 @@ type Response struct {
 // or modify it. Pass the same bytes the gateway received from the
 // client (re-serialized from the parsed envelope is fine; the agent's
 // id round-trips faithfully either way).
-func (c *Client) Forward(ctx context.Context, body []byte) (*Response, error) {
+//
+// extra are per-call headers — the per-tool brokered credential. They
+// are applied last, so they override the client's global credential
+// (Config.Headers) for that specific call. Pass nil for tools that use
+// the global credential.
+func (c *Client) Forward(ctx context.Context, body []byte, extra map[string]string) (*Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, &Error{Kind: ErrTransport, cause: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	// Broker the upstream credential: inject the gateway-held headers
-	// (e.g. Authorization) onto the outbound request. Set after the
-	// defaults so an operator-supplied Content-Type/Accept can override.
+	// Broker the upstream credential: inject the gateway-held global
+	// headers (e.g. Authorization) onto the outbound request. Set after
+	// the defaults so an operator-supplied Content-Type/Accept can
+	// override.
 	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
+	// Per-tool credential overrides the global one for this call.
+	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
 
