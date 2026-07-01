@@ -229,6 +229,21 @@ func New(cfg Config) *http.Server {
 		FaultIsolation:    cfg.FaultIsolation,
 	}))
 
+	// Reply-side outbound gateway (A1). Inspects the agent's proposed
+	// final answer to the user, reusing the same content filter that
+	// guards tool responses (PII + credential/secret classes). Registered
+	// alongside /v1/mcp; when no filter is configured it passes replies
+	// through (allow) but still enforces the kill switch and revocation.
+	mux.Handle("POST /v1/reply", handlers.NewReplyHandler(handlers.ReplyHandlerConfig{
+		Logger:            logger,
+		MasterKey:         cfg.MasterKey,
+		RequireCapability: cfg.RequireCapability,
+		ReplyFilter:       cfg.PIIFilter,
+		KillSwitch:        cfg.KillSwitch,
+		Revocation:        cfg.Revocation,
+		Audit:             cfg.Audit,
+	}))
+
 	// Prometheus scrape endpoint. Behind a flag because exposing
 	// internal metrics on the public API port is an info-disclosure
 	// risk for naive deployments. Operators who scrape via a
