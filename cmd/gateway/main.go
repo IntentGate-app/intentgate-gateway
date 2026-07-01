@@ -167,6 +167,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
@@ -550,6 +551,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	killSwitchStore, killSwitchDesc, err := loadKillSwitch(context.Background(), logger, postgresURL)
+	if err != nil {
+		logger.Error("failed to initialize kill switch store", "err", err)
+		os.Exit(1)
+	}
+	_ = killSwitchDesc
+
 	approvalsStore, approvalsDesc, err := loadApprovals(context.Background(), logger, approvalsBackend, postgresURL)
 	if err != nil {
 		logger.Error("failed to initialize approvals store", "err", err)
@@ -700,6 +708,7 @@ func main() {
 		Upstream:              upstreamClient,
 		Credentials:           credStore,
 		Revocation:            revocationStore,
+		KillSwitch:            killSwitchStore,
 		Approvals:             approvalsStore,
 		ApprovalTimeout:       approvalTimeout,
 		ArgRedaction:          argRedaction,
@@ -1574,5 +1583,23 @@ func loadRevocation(ctx context.Context, logger *slog.Logger, postgresURL string
 		return nil, "", err
 	}
 	logger.Info("revocation store: postgres", "dsn_set", true)
+	return store, "postgres", nil
+}
+
+// loadKillSwitch constructs the kill-switch store. Postgres when a DSN
+// is set (so an engaged breaker is honoured across every replica),
+// otherwise in-memory (single-replica; engaged breakers are lost on
+// restart, which is acceptable for dev and single-node installs).
+func loadKillSwitch(ctx context.Context, logger *slog.Logger, postgresURL string) (killswitch.Store, string, error) {
+	if postgresURL == "" {
+		logger.Info("kill switch store: in-memory (single-replica only, lost on restart)",
+			"hint", "set INTENTGATE_POSTGRES_URL for durable, multi-replica-safe kill switch")
+		return killswitch.NewMemoryStore(), "memory", nil
+	}
+	store, err := killswitch.NewPostgresStore(ctx, postgresURL)
+	if err != nil {
+		return nil, "", err
+	}
+	logger.Info("kill switch store: postgres", "dsn_set", true)
 	return store, "postgres", nil
 }

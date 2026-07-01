@@ -18,6 +18,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
@@ -83,6 +84,12 @@ type MCPHandlerConfig struct {
 	// deployments always supply one (memory-backed for single-replica
 	// dev, Postgres-backed for multi-replica or auditable installs).
 	Revocation revocation.Store
+	// KillSwitch is the incident-response circuit breaker, consulted in
+	// the capability check before revocation. When an engaged entry
+	// covers the request (a global kill, a kill on the token's tenant,
+	// or a kill on the token's agent) the call is halted. A store error
+	// fails closed. nil disables the check.
+	KillSwitch killswitch.Store
 	// Metrics is the Prometheus instrumentation. nil disables all
 	// observation calls (the helpers nil-check internally so handlers
 	// don't need to).
@@ -1186,6 +1193,34 @@ func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string) capability
 	}
 	if err := tok.Verify(h.cfg.MasterKey); err != nil {
 		return capabilityCheckResult{err: err}
+	}
+
+	// Kill switch runs before revocation: it is the operator's circuit
+	// breaker for whole classes of traffic (this agent, this tenant, or
+	// everything), independent of any specific token's JTI. Like
+	// revocation, a store error fails closed — an engaged breaker must
+	// not be silently bypassed by a store outage.
+	if h.cfg.KillSwitch != nil {
+		halted, entry, kerr := h.cfg.KillSwitch.Active(r.Context(), tok.Tenant, tok.Subject)
+		switch {
+		case kerr != nil:
+			h.cfg.Logger.Error("kill-switch lookup failed; failing closed",
+				"jti", tok.ID, "err", kerr)
+			return capabilityCheckResult{
+				agentID: tok.Subject,
+				token:   tok,
+				err:     capError("kill switch store unavailable; request halted (fail-closed)"),
+			}
+		case halted:
+			h.cfg.Logger.Warn("request halted by kill switch",
+				"scope", entry.Type, "tenant", entry.Tenant,
+				"agent", entry.Value, "reason", entry.Reason)
+			return capabilityCheckResult{
+				agentID: tok.Subject,
+				token:   tok,
+				err:     capError("halted by kill switch (" + string(entry.Type) + ")"),
+			}
+		}
 	}
 
 	if h.cfg.Revocation != nil {

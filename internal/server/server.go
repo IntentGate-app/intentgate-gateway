@@ -15,6 +15,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/handlers"
+	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
@@ -95,6 +96,10 @@ type Config struct {
 	// tokens revoked after issuance. nil means the revocation step is
 	// skipped (dev convenience). Production supplies a real store.
 	Revocation revocation.Store
+	// KillSwitch is the incident-response circuit breaker consulted in
+	// the capability check (before revocation) and managed by the
+	// /v1/admin/kill-switch endpoints. nil disables it.
+	KillSwitch killswitch.Store
 	// AdminToken is the superadmin shared secret. Holders see and
 	// operate on every tenant. Empty disables the superadmin path
 	// — per-tenant admins (TenantAdmins) can still authenticate.
@@ -212,6 +217,7 @@ func New(cfg Config) *http.Server {
 		Upstream:          cfg.Upstream,
 		Credentials:       cfg.Credentials,
 		Revocation:        cfg.Revocation,
+		KillSwitch:        cfg.KillSwitch,
 		Metrics:           cfg.Metrics,
 		Approvals:         cfg.Approvals,
 		ApprovalTimeout:   cfg.ApprovalTimeout,
@@ -243,8 +249,16 @@ func New(cfg Config) *http.Server {
 			Revocation:   cfg.Revocation,
 			Audit:        cfg.Audit,
 			Credentials:  cfg.Credentials,
+			KillSwitch:   cfg.KillSwitch,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
+		// Kill switch (incident-response circuit breaker). Registered
+		// whenever a store is wired in.
+		if cfg.KillSwitch != nil {
+			mux.Handle("GET /v1/admin/kill-switch", handlers.NewAdminKillSwitchListHandler(adminCfg))
+			mux.Handle("POST /v1/admin/kill-switch", handlers.NewAdminKillSwitchEngageHandler(adminCfg))
+			mux.Handle("POST /v1/admin/kill-switch/release", handlers.NewAdminKillSwitchReleaseHandler(adminCfg))
+		}
 		// Per-tool upstream credential brokering (console-managed). Only
 		// registered when a durable credential store is wired in.
 		if cfg.Credentials != nil {

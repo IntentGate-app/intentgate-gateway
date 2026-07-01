@@ -19,6 +19,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
@@ -73,6 +74,9 @@ type AdminConfig struct {
 	// the /v1/admin/upstream-credentials endpoints. nil disables those
 	// routes (per-tool brokering is env-only or off).
 	Credentials *credentials.Store
+	// KillSwitch is the incident-response circuit breaker managed by the
+	// /v1/admin/kill-switch endpoints. nil disables those routes.
+	KillSwitch killswitch.Store
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.
