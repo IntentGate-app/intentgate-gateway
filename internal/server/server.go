@@ -23,6 +23,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/policystore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
+	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 
@@ -100,6 +101,14 @@ type Config struct {
 	// the capability check (before revocation) and managed by the
 	// /v1/admin/kill-switch endpoints. nil disables it.
 	KillSwitch killswitch.Store
+	// TaskBinder is the task-level intent binder (goal-drift), consulted
+	// after the intent check when a request carries an X-Task-Id header.
+	// nil or disabled makes the step a no-op.
+	TaskBinder *task.Binder
+	// Tasks is the task store the /v1/admin/tasks endpoints read for the
+	// console. Usually the same store the binder writes to. nil disables
+	// those routes.
+	Tasks task.Store
 	// AdminToken is the superadmin shared secret. Holders see and
 	// operate on every tenant. Empty disables the superadmin path
 	// — per-tenant admins (TenantAdmins) can still authenticate.
@@ -218,6 +227,7 @@ func New(cfg Config) *http.Server {
 		Credentials:       cfg.Credentials,
 		Revocation:        cfg.Revocation,
 		KillSwitch:        cfg.KillSwitch,
+		TaskBinder:        cfg.TaskBinder,
 		Metrics:           cfg.Metrics,
 		Approvals:         cfg.Approvals,
 		ApprovalTimeout:   cfg.ApprovalTimeout,
@@ -265,8 +275,14 @@ func New(cfg Config) *http.Server {
 			Audit:        cfg.Audit,
 			Credentials:  cfg.Credentials,
 			KillSwitch:   cfg.KillSwitch,
+			Tasks:        cfg.Tasks,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
+		// Task-level intent binding (goal-drift): read-only list + clear.
+		if cfg.Tasks != nil {
+			mux.Handle("GET /v1/admin/tasks", handlers.NewAdminTasksListHandler(adminCfg))
+			mux.Handle("POST /v1/admin/tasks/clear", handlers.NewAdminTaskClearHandler(adminCfg))
+		}
 		// Kill switch (incident-response circuit breaker). Registered
 		// whenever a store is wired in.
 		if cfg.KillSwitch != nil {

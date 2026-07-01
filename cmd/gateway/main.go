@@ -176,6 +176,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/server"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
+	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 	"github.com/IntentGate-app/intentgate-gateway/internal/webhook"
@@ -558,6 +559,13 @@ func main() {
 	}
 	_ = killSwitchDesc
 
+	taskBinder, taskStore, taskDesc, err := loadTaskBinder(context.Background(), logger, postgresURL)
+	if err != nil {
+		logger.Error("failed to initialize task binder", "err", err)
+		os.Exit(1)
+	}
+	_ = taskDesc
+
 	approvalsStore, approvalsDesc, err := loadApprovals(context.Background(), logger, approvalsBackend, postgresURL)
 	if err != nil {
 		logger.Error("failed to initialize approvals store", "err", err)
@@ -709,6 +717,8 @@ func main() {
 		Credentials:           credStore,
 		Revocation:            revocationStore,
 		KillSwitch:            killSwitchStore,
+		TaskBinder:            taskBinder,
+		Tasks:                 taskStore,
 		Approvals:             approvalsStore,
 		ApprovalTimeout:       approvalTimeout,
 		ArgRedaction:          argRedaction,
@@ -1602,4 +1612,49 @@ func loadKillSwitch(ctx context.Context, logger *slog.Logger, postgresURL string
 	}
 	logger.Info("kill switch store: postgres", "dsn_set", true)
 	return store, "postgres", nil
+}
+
+// loadTaskBinder constructs the task-level intent binder (goal-drift).
+// Disabled by default; set INTENTGATE_TASK_BINDING=true to enable. When
+// enabled it uses Postgres if a DSN is set (so task drift state is shared
+// across replicas) or an in-memory store otherwise. Thresholds default
+// from task.DefaultConfig() and can be overridden via the
+// INTENTGATE_TASK_* environment variables.
+func loadTaskBinder(ctx context.Context, logger *slog.Logger, postgresURL string) (*task.Binder, task.Store, string, error) {
+	v := os.Getenv("INTENTGATE_TASK_BINDING")
+	if v != "true" && v != "1" {
+		logger.Info("task binding: disabled",
+			"hint", "set INTENTGATE_TASK_BINDING=true to enable goal-drift detection")
+		return task.NewBinder(nil, task.Config{}), nil, "disabled", nil
+	}
+
+	cfg := task.DefaultConfig()
+	cfg.Enabled = true
+	if s := os.Getenv("INTENTGATE_TASK_MAX_CALLS"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			cfg.MaxCalls = n
+		}
+	}
+	if s := os.Getenv("INTENTGATE_TASK_WARN_SCORE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			cfg.WarnScore = n
+		}
+	}
+	if s := os.Getenv("INTENTGATE_TASK_BLOCK_SCORE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			cfg.BlockScore = n
+		}
+	}
+
+	if postgresURL == "" {
+		logger.Info("task binding: enabled, in-memory store (single-replica only, lost on restart)")
+		store := task.NewMemoryStore()
+		return task.NewBinder(store, cfg), store, "memory", nil
+	}
+	store, err := task.NewPostgresStore(ctx, postgresURL)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	logger.Info("task binding: enabled, postgres store", "dsn_set", true)
+	return task.NewBinder(store, cfg), store, "postgres", nil
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
+	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 )
 
 // AdminConfig configures the admin-API handlers.
@@ -77,6 +78,9 @@ type AdminConfig struct {
 	// KillSwitch is the incident-response circuit breaker managed by the
 	// /v1/admin/kill-switch endpoints. nil disables those routes.
 	KillSwitch killswitch.Store
+	// Tasks is the task-binding store read by the /v1/admin/tasks
+	// endpoints (list + clear). nil disables those routes.
+	Tasks task.Store
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.

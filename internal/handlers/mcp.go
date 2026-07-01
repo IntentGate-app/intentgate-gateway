@@ -25,6 +25,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 )
@@ -90,6 +91,12 @@ type MCPHandlerConfig struct {
 	// or a kill on the token's agent) the call is halted. A store error
 	// fails closed. nil disables the check.
 	KillSwitch killswitch.Store
+	// TaskBinder is the task-level intent binder (goal-drift). When
+	// enabled and the request carries an X-Task-Id header, it binds the
+	// task to the plan the extractor declared at task start and scores
+	// drift across the session, flagging or blocking on threshold. nil
+	// or disabled makes the step a no-op.
+	TaskBinder *task.Binder
 	// Metrics is the Prometheus instrumentation. nil disables all
 	// observation calls (the helpers nil-check internally so handlers
 	// don't need to).
@@ -305,6 +312,52 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			audit.DecisionBlock, audit.CheckIntent, intResult.err.Error(), start, 0)
 		return mcp.NewErrorResponse(req.ID, mcp.CodeIntentFailed,
 			"intent check failed", intResult.err.Error())
+	}
+
+	// Check 2b (OPT-IN): task-level intent binding (goal-drift). Binds
+	// the whole task (identified by the X-Task-Id header) to the plan the
+	// extractor declared at task start, and scores drift across the
+	// session: off-plan tool calls, distinct-tool growth, and running
+	// past the call budget. Flags on the warn threshold (allow + audit)
+	// and blocks on the block threshold. No-op when disabled or when the
+	// request carries no task id. A store error is advisory (log + allow),
+	// since binding measures drift rather than gating a single action.
+	if h.cfg.TaskBinder != nil && h.cfg.TaskBinder.Enabled() {
+		if taskID := r.Header.Get("X-Task-Id"); taskID != "" {
+			var plan []string
+			var summary string
+			if intResult.intent != nil {
+				plan = intResult.intent.AllowedTools
+				summary = intResult.intent.Summary
+			}
+			var taskTenant string
+			if capResult.token != nil {
+				taskTenant = capResult.token.Tenant
+			}
+			bindRes, berr := h.cfg.TaskBinder.Bind(
+				ctx, taskTenant, capResult.agentID, taskID, params.Name, plan, summary)
+			if berr != nil {
+				h.cfg.Logger.Error("task binding store error; allowing (advisory)",
+					"task", taskID, "err", berr)
+			}
+			switch bindRes.Outcome {
+			case task.OutcomeBlock:
+				h.cfg.Logger.Info("mcp tools/call blocked",
+					"tool", params.Name, "check", "task", "agent", capResult.agentID,
+					"task", taskID, "drift", bindRes.Drift, "reason", bindRes.Reason)
+				h.emitAudit(ctx, r, params, capResult, intResult,
+					audit.DecisionBlock, audit.CheckIntent,
+					fmt.Sprintf("task drift halted (drift=%d): %s", bindRes.Drift, bindRes.Reason),
+					start, 0)
+				return mcp.NewErrorResponse(req.ID, mcp.CodeIntentFailed,
+					"task drift: session halted", bindRes.Reason)
+			case task.OutcomeFlag:
+				h.emitAudit(ctx, r, params, capResult, intResult,
+					audit.DecisionAllow, audit.CheckIntent,
+					fmt.Sprintf("task drift flagged (drift=%d): %s", bindRes.Drift, bindRes.Reason),
+					start, 0)
+			}
+		}
 	}
 
 	// Check 3 (OPT-IN): provenance. Only fires when the operator has
