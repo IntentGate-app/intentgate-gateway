@@ -139,6 +139,25 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "create_payee",
+        "description": (
+            "Register a new payee / supplier that money can later be sent "
+            "to. A procurement agent calls this before paying a brand-new "
+            "vendor. Harmless on its own; the risk is the SEQUENCE "
+            "create-a-supplier-then-pay-it in the same session (the "
+            "invoice-fraud pattern), which the gateway's plan-level "
+            "correlation catches even when each step is individually legal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Payee / supplier name."},
+                "iban": {"type": "string", "description": "Optional account / IBAN."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
         "name": "flaky_demo",
         "description": (
             "Controlled-failure tool used by the AGENT08 cascading-failure "
@@ -397,11 +416,32 @@ def tool_transfer_funds(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def tool_create_payee(args: dict[str, Any]) -> dict[str, Any]:
+    """Register a new payee/supplier and return a synthetic ack. The demo
+    persists nothing — the point is that this OpCreate is what the
+    gateway's plan-level correlation records, so a later payment to the
+    same party (the invoice-fraud pattern) can be caught and held even
+    though creating a supplier and paying a supplier are each legal on
+    their own. Production tool servers would write to the vendor master."""
+    name = str(args.get("name", "")).strip()
+    if not name:
+        raise ValueError("name is required")
+    iban = str(args.get("iban", "")).strip()
+    return {
+        "ok": True,
+        "payee": name,
+        "iban": iban or f"DEMO-IBAN-{abs(hash(name)) % 100000:05d}",
+        "status": "registered",
+        "_note": "demo tool — no real vendor-master update",
+    }
+
+
 TOOL_DISPATCH = {
     "read_invoice": tool_read_invoice,
     "list_customers": tool_list_customers,
     "read_customer": tool_read_customer,
     "transfer_funds": tool_transfer_funds,
+    "create_payee": tool_create_payee,
     "flaky_demo": tool_flaky_demo,
 }
 
