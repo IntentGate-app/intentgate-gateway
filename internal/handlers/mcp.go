@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IntentGate-app/intentgate-gateway/internal/actionguard"
 	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
@@ -106,6 +107,11 @@ type MCPHandlerConfig struct {
 	// returning escalate without an approvals store wired
 	// degrades to block ("escalate not configured").
 	Approvals approvals.Store
+	// ActionGuard is the effect-level guard (semantic Action IR resolver
+	// plus mandatory hold and plan-level correlation). Runs just before
+	// the Rego policy stage. nil disables the stage entirely, leaving the
+	// four-check pipeline unchanged. See internal/actionguard.
+	ActionGuard *actionguard.Guard
 	// ApprovalTimeout caps how long the handler waits for a human
 	// decision before timing out and returning block. Zero falls
 	// back to 5 minutes — operators with on-call humans can lower
@@ -383,6 +389,40 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			audit.DecisionBlock, audit.CheckProvenance, provResult.err.Error(), start, 0)
 		return mcp.NewErrorResponse(req.ID, mcp.CodeProvenanceFailed,
 			"provenance check failed", provResult.err.Error())
+	}
+
+	// Check 3c (OPT-IN): action effect guard. Resolves the tool call to its
+	// canonical effect (Action IR) and applies deterministic controls a
+	// per-call string policy cannot express: a mandatory hold on irreversible
+	// high-value or unbounded-destructive actions, and plan-level correlation
+	// across the session (for example a payment to a party the same agent
+	// created earlier in this task chain, the invoice-fraud pattern). No-op
+	// when ActionGuard is nil. The session key is the task id (same identifier
+	// the goal-drift binder uses); when absent we fall back to the agent id so
+	// correlation still works within an agent's activity.
+	if h.cfg.ActionGuard != nil {
+		agStart := time.Now()
+		agSession := r.Header.Get("X-Task-Id")
+		if agSession == "" {
+			agSession = capResult.agentID
+		}
+		agRes := h.cfg.ActionGuard.Check(agSession, params.Name, params.Arguments)
+		h.cfg.Metrics.ObserveCheck("action", string(agRes.Verdict), time.Since(agStart))
+		switch agRes.Verdict {
+		case actionguard.VerdictBlock:
+			h.cfg.Logger.Info("mcp tools/call blocked",
+				"tool", params.Name, "check", "action", "agent", capResult.agentID,
+				"rule", agRes.Rule, "reason", agRes.Reason)
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckPolicy,
+				fmt.Sprintf("action guard blocked (%s): %s", agRes.Rule, agRes.Reason), start, 0)
+			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+				"action guard blocked", agRes.Reason)
+		case actionguard.VerdictEscalate:
+			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, agRes.Reason, false, start); escResp != nil {
+				return escResp
+			}
+		}
 	}
 
 	// Check 4: policy (OPA / Rego).
