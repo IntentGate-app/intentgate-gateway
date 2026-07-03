@@ -130,7 +130,7 @@ func Resolve(tool string, args map[string]any) ActionIR {
 	cents, currency := extractAmount(args)
 
 	// 7. Destination.
-	dest := firstStringKey(args, "payee", "supplier", "vendor", "to", "recipient", "account", "destination", "beneficiary")
+	dest := extractDestination(args)
 
 	// 8. Reversibility.
 	reversible := true
@@ -225,11 +225,18 @@ func hasFilterKey(args map[string]any) bool {
 // extractAmount finds a financial magnitude and returns integer cents,
 // resistant to formatting drift: 5000, "5000", "5,000", "5_000", "5 000",
 // "EUR 5000", "5.000,00" all resolve to 500000.
+//
+// The money-bearing argument is matched by TOKEN, not exact name, so
+// real-world compound keys resolve too: amount_eur, total_usd,
+// payment_amount, unit_price all carry through. This matters because a
+// guard that only reads a key literally named "amount" would read a
+// magnitude of 0 for a tool whose field is "amount_eur" and silently let
+// a high-value payment through.
 func extractAmount(args map[string]any) (int64, string) {
 	currency := ""
 	for _, k := range []string{"amount", "total", "value", "sum", "price", "cost", "limit"} {
 		for ak, av := range args {
-			if strings.ToLower(ak) != k {
+			if !keyHasToken(ak, k) {
 				continue
 			}
 			switch v := av.(type) {
@@ -309,6 +316,51 @@ func stripSeparators(s string) string {
 	s = strings.ReplaceAll(s, ",", "")
 	s = strings.ReplaceAll(s, ".", "")
 	return s
+}
+
+// keyHasToken reports whether an argument key contains the given token when
+// split on non-alphanumeric separators. So keyHasToken("amount_eur", "amount")
+// is true, letting compound field names resolve to their money noun.
+func keyHasToken(key, token string) bool {
+	for _, t := range reNonAlnum.Split(strings.ToLower(key), -1) {
+		if t == token {
+			return true
+		}
+	}
+	return false
+}
+
+// extractDestination finds the payee / target of an action. It tries exact
+// preferred keys first, then compound keys by token (to_account, payee_id),
+// but never treats a source ("from_*") key as the destination, so a
+// transfer's from_account is not mistaken for where the money is going.
+func extractDestination(args map[string]any) string {
+	if d := firstStringKey(args, "payee", "supplier", "vendor", "recipient", "beneficiary", "destination", "to"); d != "" {
+		return d
+	}
+	destTokens := map[string]bool{
+		"payee": true, "supplier": true, "vendor": true, "recipient": true,
+		"beneficiary": true, "destination": true, "to": true, "account": true,
+	}
+	for ak, av := range args {
+		s, ok := av.(string)
+		if !ok {
+			continue
+		}
+		matched, hasFrom := false, false
+		for _, t := range reNonAlnum.Split(strings.ToLower(ak), -1) {
+			if t == "from" {
+				hasFrom = true
+			}
+			if destTokens[t] {
+				matched = true
+			}
+		}
+		if matched && !hasFrom {
+			return s
+		}
+	}
+	return ""
 }
 
 func firstStringKey(args map[string]any, keys ...string) string {
