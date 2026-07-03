@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/IntentGate-app/intentgate-gateway/internal/actionguard"
 	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
@@ -168,6 +169,12 @@ type Config struct {
 	// + bulkhead. nil disables the layer. Constructed at startup
 	// from INTENTGATE_FAULT_ISOLATION_*. See internal/faultisolation.
 	FaultIsolation *faultisolation.Isolator
+	// ActionGuard is the optional effect-level enforcement layer
+	// (semantic Action IR resolver + mandatory hold + plan-level
+	// correlation, #28). Runs just before the Rego policy stage. nil
+	// disables the stage; the gateway pipeline is unchanged. Constructed
+	// at startup from INTENTGATE_ACTION_GUARD_*. See internal/actionguard.
+	ActionGuard *actionguard.Guard
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -237,6 +244,7 @@ func New(cfg Config) *http.Server {
 		OutputSchemas:     cfg.OutputSchemas,
 		TenantScope:       cfg.TenantScope,
 		FaultIsolation:    cfg.FaultIsolation,
+		ActionGuard:       cfg.ActionGuard,
 	}))
 
 	// Reply-side outbound gateway (A1). Inspects the agent's proposed

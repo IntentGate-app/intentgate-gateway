@@ -159,6 +159,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/IntentGate-app/intentgate-gateway/internal/actionguard"
 	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
@@ -240,6 +241,16 @@ func main() {
 	faultIsolationMaxConcurrentRaw := envOr("INTENTGATE_FAULT_ISOLATION_MAX_CONCURRENT_PER_TOOL", "20")
 	faultIsolationFailureThresholdRaw := envOr("INTENTGATE_FAULT_ISOLATION_FAILURE_THRESHOLD", "5")
 	faultIsolationCooldownMSRaw := envOr("INTENTGATE_FAULT_ISOLATION_COOLDOWN_MS", "30000")
+	// Action guard: effect-level enforcement (semantic Action IR resolver +
+	// mandatory hold + plan-level correlation, #28). Off by default; the
+	// gateway runs its documented pipeline unchanged. When enabled, an
+	// effect check runs just before the Rego policy stage: irreversible
+	// high-value actions escalate for approval, unbounded deletes are
+	// blocked, and a payment to a party the same agent created earlier in
+	// the session escalates. See internal/actionguard.
+	actionGuardEnabled := envOr("INTENTGATE_ACTION_GUARD_ENABLED", "") == "true"
+	actionGuardEscalateOverCentsRaw := envOr("INTENTGATE_ACTION_GUARD_ESCALATE_OVER_CENTS", "500000")
+	actionGuardBlockUnboundedDelete := envOr("INTENTGATE_ACTION_GUARD_BLOCK_UNBOUNDED_DELETE", "true") != "false"
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -426,6 +437,25 @@ func main() {
 		)
 	} else {
 		logger.Info("fault isolation not configured (set INTENTGATE_FAULT_ISOLATION_ENABLED=true to enable)")
+	}
+
+	var actionGuard *actionguard.Guard
+	if actionGuardEnabled {
+		escalateOverCents, err := strconv.ParseInt(actionGuardEscalateOverCentsRaw, 10, 64)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_ACTION_GUARD_ESCALATE_OVER_CENTS", "err", err)
+			os.Exit(1)
+		}
+		actionGuard = actionguard.New(actionguard.Config{
+			EscalateOverCents:    escalateOverCents,
+			BlockUnboundedDelete: actionGuardBlockUnboundedDelete,
+		})
+		logger.Info("action guard enabled",
+			"escalate_over_cents", escalateOverCents,
+			"block_unbounded_delete", actionGuardBlockUnboundedDelete,
+		)
+	} else {
+		logger.Info("action guard not configured (set INTENTGATE_ACTION_GUARD_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)
@@ -697,6 +727,7 @@ func main() {
 		"policy_store", policyStoreDesc,
 		"metrics_endpoint", metricsEnabled,
 		"otel_tracing", otelDesc,
+		"action_guard", actionGuardEnabled,
 	)
 
 	srv := server.New(server.Config{
@@ -727,6 +758,7 @@ func main() {
 		OutputSchemas:         outputSchemas,
 		TenantScope:           tenantScopeEnforcer,
 		FaultIsolation:        faultIsolator,
+		ActionGuard:           actionGuard,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
