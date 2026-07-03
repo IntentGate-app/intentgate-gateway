@@ -101,6 +101,41 @@ func TestResolve_CreateSupplier(t *testing.T) {
 	}
 }
 
+// The lab's transfer_funds tool names its fields amount_eur / to_account /
+// from_account. The resolver must read the magnitude from amount_eur (not just
+// a field literally named "amount"), pick to_account as the destination, and
+// never mistake from_account for the destination. Without this, a high-value
+// payment would resolve to 0 cents and slip past the mandatory hold.
+func TestResolve_TransferFundsRealArgNames(t *testing.T) {
+	ir := Resolve("transfer_funds", map[string]any{
+		"from_account": "ACME-OPS",
+		"to_account":   "VENDOR-G42",
+		"amount_eur":   6000.0,
+	})
+	if ir.Op != OpPay {
+		t.Fatalf("op = %s, want pay", ir.Op)
+	}
+	if ir.MagnitudeCents != 600000 {
+		t.Fatalf("cents = %d, want 600000 (amount_eur must be read)", ir.MagnitudeCents)
+	}
+	if ir.Reversible {
+		t.Fatalf("transfer must be irreversible")
+	}
+	if ir.Destination != "VENDOR-G42" {
+		t.Fatalf("dest = %q, want VENDOR-G42 (to_account, not from_account)", ir.Destination)
+	}
+}
+
+// Compound money keys in several shapes must all resolve to a magnitude.
+func TestResolve_CompoundMoneyKeys(t *testing.T) {
+	for _, k := range []string{"amount_eur", "total_usd", "payment_amount", "unit_price"} {
+		ir := Resolve("pay", map[string]any{k: 5000.0})
+		if ir.MagnitudeCents != 500000 {
+			t.Errorf("key %q: cents = %d, want 500000", k, ir.MagnitudeCents)
+		}
+	}
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {
