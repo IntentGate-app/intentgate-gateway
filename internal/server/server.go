@@ -191,6 +191,12 @@ type Config struct {
 	// classify east-west edges so the map matches enforcement. Empty defaults
 	// to "agent:" in the handler.
 	AgentToolPrefix string
+	// EastWestConfigPath and ZoneScopeConfigPath are the JSON config files the
+	// segmentation guards load at startup. PUT /v1/admin/segmentation writes
+	// the submitted config to these paths (applied on the next restart). Empty
+	// means the write endpoint rejects edits for that half.
+	EastWestConfigPath  string
+	ZoneScopeConfigPath string
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -305,6 +311,9 @@ func New(cfg Config) *http.Server {
 			AgentToolPrefix: cfg.AgentToolPrefix,
 			EastWest:        cfg.EastWest,
 			ZoneScope:       cfg.ZoneScope,
+
+			EastWestConfigPath:  cfg.EastWestConfigPath,
+			ZoneScopeConfigPath: cfg.ZoneScopeConfigPath,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
 		// Task-level intent binding (goal-drift): read-only list + clear.
@@ -335,8 +344,10 @@ func New(cfg Config) *http.Server {
 		// that case).
 		mux.Handle("GET /v1/admin/tenants", handlers.NewAdminTenantsListHandler(adminCfg))
 		// Current segmentation policy (zones, edges, scopes) for the console
-		// zone-management view. Read-only; reflects the guards' live config.
+		// zone-management view. Read reflects the guards' live config; write
+		// persists to the config files and applies on the next restart.
 		mux.Handle("GET /v1/admin/segmentation", handlers.NewAdminSegmentationHandler(adminCfg))
+		mux.Handle("PUT /v1/admin/segmentation", handlers.NewAdminSegmentationWriteHandler(adminCfg))
 		// Audit query is registered only when an AuditStore is wired
 		// in. Older deployments running stdout-only audit get a 404,
 		// which is what the console keys off to fall back to its

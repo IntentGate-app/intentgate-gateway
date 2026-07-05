@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +97,12 @@ type AdminConfig struct {
 	// corresponding overlay off; the traffic counts still render.
 	EastWest  *eastwest.Guard
 	ZoneScope *zonescope.Guard
+	// EastWestConfigPath and ZoneScopeConfigPath are the JSON config files the
+	// guards load at startup. When set, PUT /v1/admin/segmentation writes the
+	// submitted config to these paths (applied on the next restart). Empty
+	// means the write endpoint rejects edits for that half.
+	EastWestConfigPath  string
+	ZoneScopeConfigPath string
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.
@@ -894,6 +901,131 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 
 		_ = json.NewEncoder(w).Encode(out)
 	})
+}
+
+// NewAdminSegmentationWriteHandler returns the PUT /v1/admin/segmentation
+// handler.
+//
+// It validates a submitted segmentation config and persists it to the JSON
+// files the guards load at startup (INTENTGATE_EASTWEST_CONFIG,
+// INTENTGATE_ZONE_SCOPE_CONFIG). The change applies on the next gateway
+// restart; the response carries applied_on_restart=true. Only content is taken
+// from the request, never a file path, so an attacker cannot direct the write.
+//
+// Segmentation config is global, so only a superadmin token may write it; a
+// per-tenant admin gets 403. Returns 400 when no writable config path is
+// configured or the body is malformed.
+func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg)
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+		if auth.tenant != "" {
+			adminError(w, http.StatusForbidden,
+				"segmentation config is global; requires a superadmin token")
+			return
+		}
+		if cfg.EastWestConfigPath == "" && cfg.ZoneScopeConfigPath == "" {
+			adminError(w, http.StatusBadRequest,
+				"no writable segmentation config path configured (set INTENTGATE_EASTWEST_CONFIG and/or INTENTGATE_ZONE_SCOPE_CONFIG)")
+			return
+		}
+
+		var body segmentationConfig
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		if err := dec.Decode(&body); err != nil {
+			adminError(w, http.StatusBadRequest, "invalid segmentation JSON: "+err.Error())
+			return
+		}
+		if err := validateSegmentation(body); err != nil {
+			adminError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		wrote := []string{}
+		if cfg.EastWestConfigPath != "" {
+			prefix := body.EastWest.AgentToolPrefix
+			if prefix == "" {
+				prefix = "agent:"
+			}
+			ew := map[string]any{
+				"agent_tool_prefix": prefix,
+				"allow_intra_zone":  body.EastWest.AllowIntraZone,
+				"zones":             orEmptyMap(body.EastWest.Zones),
+				"allowed_edges":     orEmptyEdges(body.EastWest.AllowedEdges),
+			}
+			if err := writeJSONFile(cfg.EastWestConfigPath, ew); err != nil {
+				cfg.Logger.Error("write east-west config failed", "err", err)
+				adminError(w, http.StatusInternalServerError, "could not write east-west config: "+err.Error())
+				return
+			}
+			wrote = append(wrote, cfg.EastWestConfigPath)
+		}
+		if cfg.ZoneScopeConfigPath != "" {
+			zs := map[string]any{"scopes": body.ZoneScope.Scopes}
+			if err := writeJSONFile(cfg.ZoneScopeConfigPath, zs); err != nil {
+				cfg.Logger.Error("write zone-scope config failed", "err", err)
+				adminError(w, http.StatusInternalServerError, "could not write zone-scope config: "+err.Error())
+				return
+			}
+			wrote = append(wrote, cfg.ZoneScopeConfigPath)
+		}
+
+		cfg.Logger.Info("segmentation config updated", "files", wrote)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":                 true,
+			"applied_on_restart": true,
+			"wrote":              wrote,
+		})
+	})
+}
+
+func validateSegmentation(c segmentationConfig) error {
+	for agent, zone := range c.EastWest.Zones {
+		if agent == "" || zone == "" {
+			return errors.New("east-west zones: agent id and zone must both be non-empty")
+		}
+	}
+	for _, e := range c.EastWest.AllowedEdges {
+		if e[0] == "" || e[1] == "" {
+			return errors.New("east-west allowed_edges: both zones must be non-empty")
+		}
+	}
+	for zone := range c.ZoneScope.Scopes {
+		if zone == "" {
+			return errors.New("zone_scope: zone id must be non-empty")
+		}
+	}
+	return nil
+}
+
+func writeJSONFile(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o600)
+}
+
+func orEmptyMap(m map[string]string) map[string]string {
+	if m == nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+func orEmptyEdges(e [][2]string) [][2]string {
+	if e == nil {
+		return [][2]string{}
+	}
+	return e
 }
 
 // NewAdminAuditVerifyHandler returns the GET /v1/admin/audit/verify

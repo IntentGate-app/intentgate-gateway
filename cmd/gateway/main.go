@@ -846,6 +846,8 @@ func main() {
 		EastWest:              eastWest,
 		ZoneScope:             zoneScope,
 		AgentToolPrefix:       eastWestPrefix,
+		EastWestConfigPath:    eastWestConfigPath,
+		ZoneScopeConfigPath:   zoneScopeConfigPath,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
