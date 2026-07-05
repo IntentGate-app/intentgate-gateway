@@ -439,7 +439,14 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	// EastWest is nil or the call is not an agent-to-agent call.
 	if h.cfg.EastWest != nil {
 		ewStart := time.Now()
-		ewRes := h.cfg.EastWest.Check(capResult.agentID, params.Name)
+		// Caller zone comes from the signed capability token when present,
+		// so it is authoritative and cannot be forged. The guard falls back
+		// to its config directory when the token carries no zone.
+		var callerZone string
+		if capResult.token != nil {
+			callerZone = capResult.token.Zone
+		}
+		ewRes := h.cfg.EastWest.Check(capResult.agentID, callerZone, params.Name)
 		if ewRes.EastWest {
 			h.cfg.Metrics.ObserveCheck("eastwest", string(ewRes.Verdict), time.Since(ewStart))
 			if ewRes.Verdict == eastwest.VerdictDeny {

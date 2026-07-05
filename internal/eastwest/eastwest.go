@@ -113,12 +113,23 @@ func (g *Guard) zone(agent string) string {
 // Check decides whether callerAgent may call the given tool. If the tool is
 // not an agent-to-agent call, the result is Allow with EastWest=false, so the
 // caller can treat it as a pass-through.
-func (g *Guard) Check(callerAgent, tool string) Result {
+//
+// callerZone is the caller's zone as carried on its (signed) capability token.
+// When non-empty it is authoritative and cannot be forged, so it wins over the
+// config directory. When empty, the guard falls back to the configured Zones
+// map keyed by agent id. The callee's zone always comes from the Zones
+// directory: on this call the gateway sees only the callee's name, not its
+// token.
+func (g *Guard) Check(callerAgent, callerZone, tool string) Result {
 	callee, ok := g.CalleeAgent(tool)
 	if !ok {
 		return Result{Verdict: VerdictAllow, EastWest: false, CallerAgent: callerAgent}
 	}
-	cz, tz := g.zone(callerAgent), g.zone(callee)
+	cz := callerZone
+	if cz == "" {
+		cz = g.zone(callerAgent)
+	}
+	tz := g.zone(callee)
 	res := Result{
 		CallerAgent: callerAgent, CalleeAgent: callee,
 		CallerZone: cz, CalleeZone: tz, EastWest: true,
