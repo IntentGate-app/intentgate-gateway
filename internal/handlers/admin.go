@@ -818,6 +818,84 @@ func NewAdminFlowRecommendHandler(cfg AdminConfig) http.Handler {
 	})
 }
 
+// segmentationConfig is the read/write shape of the current segmentation
+// policy: the east-west zone model and the per-zone north-south scopes. It
+// mirrors the two config files (INTENTGATE_EASTWEST_CONFIG,
+// INTENTGATE_ZONE_SCOPE_CONFIG) so the console can round-trip it.
+type segmentationConfig struct {
+	EastWest struct {
+		Enabled         bool              `json:"enabled"`
+		AgentToolPrefix string            `json:"agent_tool_prefix"`
+		AllowIntraZone  bool              `json:"allow_intra_zone"`
+		Zones           map[string]string `json:"zones"`
+		AllowedEdges    [][2]string       `json:"allowed_edges"`
+	} `json:"east_west"`
+	ZoneScope struct {
+		Enabled bool `json:"enabled"`
+		Scopes  map[string]struct {
+			Tools   []string `json:"tools"`
+			Tenants []string `json:"tenants,omitempty"`
+		} `json:"scopes"`
+	} `json:"zone_scope"`
+}
+
+// NewAdminSegmentationHandler returns the GET /v1/admin/segmentation handler.
+//
+// It returns the gateway's current segmentation policy: the east-west zone
+// directory and allowed edges, and the per-zone north-south tool scopes. This
+// is the data the console zone-management view edits. Read-only; nil guards
+// return enabled=false with empty maps so the console renders an "off" state.
+func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg)
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+
+		var out segmentationConfig
+		out.EastWest.Zones = map[string]string{}
+		out.EastWest.AllowedEdges = [][2]string{}
+		out.EastWest.AgentToolPrefix = "agent:"
+		out.ZoneScope.Scopes = map[string]struct {
+			Tools   []string `json:"tools"`
+			Tenants []string `json:"tenants,omitempty"`
+		}{}
+
+		if cfg.EastWest != nil {
+			snap := cfg.EastWest.Snapshot()
+			out.EastWest.Enabled = true
+			out.EastWest.AllowIntraZone = snap.AllowIntraZone
+			if snap.AgentToolPrefix != "" {
+				out.EastWest.AgentToolPrefix = snap.AgentToolPrefix
+			}
+			if snap.Zones != nil {
+				out.EastWest.Zones = snap.Zones
+			}
+			if snap.AllowedEdges != nil {
+				out.EastWest.AllowedEdges = snap.AllowedEdges
+			}
+		}
+		if cfg.ZoneScope != nil {
+			snap := cfg.ZoneScope.Snapshot()
+			out.ZoneScope.Enabled = true
+			for zone, s := range snap.Scopes {
+				out.ZoneScope.Scopes[zone] = struct {
+					Tools   []string `json:"tools"`
+					Tenants []string `json:"tenants,omitempty"`
+				}{Tools: s.Tools, Tenants: s.Tenants}
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(out)
+	})
+}
+
 // NewAdminAuditVerifyHandler returns the GET /v1/admin/audit/verify
 // handler (Pro v2 #4, session 54).
 //

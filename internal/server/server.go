@@ -334,6 +334,9 @@ func New(cfg Config) *http.Server {
 		// tenant admins are configured (the UI hides the switcher in
 		// that case).
 		mux.Handle("GET /v1/admin/tenants", handlers.NewAdminTenantsListHandler(adminCfg))
+		// Current segmentation policy (zones, edges, scopes) for the console
+		// zone-management view. Read-only; reflects the guards' live config.
+		mux.Handle("GET /v1/admin/segmentation", handlers.NewAdminSegmentationHandler(adminCfg))
 		// Audit query is registered only when an AuditStore is wired
 		// in. Older deployments running stdout-only audit get a 404,
 		// which is what the console keys off to fall back to its
