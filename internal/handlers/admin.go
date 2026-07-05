@@ -19,6 +19,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/flowmap"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
@@ -26,6 +27,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
+	"github.com/IntentGate-app/intentgate-gateway/internal/zonescope"
 )
 
 // AdminConfig configures the admin-API handlers.
@@ -87,6 +89,12 @@ type AdminConfig struct {
 	// to classify east-west edges. Should match the east-west guard's
 	// prefix so the map and enforcement agree. Empty defaults to "agent:".
 	AgentToolPrefix string
+	// EastWest and ZoneScope are the segmentation guards, consulted read-only
+	// by the /v1/admin/flow-map endpoint to annotate each edge with the
+	// current policy verdict (allowed / denied / unscoped). nil leaves the
+	// corresponding overlay off; the traffic counts still render.
+	EastWest  *eastwest.Guard
+	ZoneScope *zonescope.Guard
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.
@@ -647,12 +655,68 @@ func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
 		}
 		graph := flowmap.Extract(flowmap.Config{AgentToolPrefix: prefix}, calls)
 
+		// Policy overlay: annotate each edge with the current segmentation
+		// verdict, so the map shows intended policy next to observed traffic.
+		// Uses the config directory to place agents (no live token here), so
+		// this is the "given your zone config" view; live enforcement uses the
+		// signed token zone.
+		annotated := make([]flowMapEdge, 0, len(graph.Edges))
+		for _, e := range graph.Edges {
+			fe := flowMapEdge{Edge: e}
+			switch e.Kind {
+			case flowmap.EdgeEastWest:
+				if cfg.EastWest != nil {
+					r := cfg.EastWest.Check(e.From, "", prefix+e.To)
+					fe.Policy = string(r.Verdict)
+					fe.PolicyReason = r.Reason
+					fe.CallerZone = r.CallerZone
+					fe.CalleeZone = r.CalleeZone
+				}
+			case flowmap.EdgeNorthSouth:
+				if cfg.ZoneScope != nil {
+					var callerZone, tenant string
+					if cfg.EastWest != nil {
+						callerZone = cfg.EastWest.ZoneOf(e.From)
+					}
+					if len(e.Tenants) > 0 {
+						tenant = e.Tenants[0]
+					}
+					r := cfg.ZoneScope.Check(callerZone, tenant, e.To)
+					if r.Enforced {
+						fe.Policy = string(r.Verdict)
+						fe.PolicyReason = r.Reason
+					} else {
+						fe.Policy = "unscoped"
+					}
+					fe.CallerZone = callerZone
+				}
+			}
+			annotated = append(annotated, fe)
+		}
+
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"graph":   graph,
+			"graph": map[string]any{
+				"nodes": graph.Nodes,
+				"edges": annotated,
+			},
 			"sampled": len(events),
 			"limit":   filter.Limit,
 		})
 	})
+}
+
+// flowMapEdge is a flow-map edge plus the segmentation policy overlay. The
+// embedded flowmap.Edge fields (from, to, kind, counts, tenants) are promoted
+// to the top level in JSON; Policy* are the overlay.
+type flowMapEdge struct {
+	flowmap.Edge
+	// Policy is the current segmentation verdict for this edge: "allow",
+	// "deny", "unscoped" (a north-south edge in a zone with no configured
+	// scope), or "" when the relevant guard is not configured.
+	Policy       string `json:"policy,omitempty"`
+	PolicyReason string `json:"policy_reason,omitempty"`
+	CallerZone   string `json:"caller_zone,omitempty"`
+	CalleeZone   string `json:"callee_zone,omitempty"`
 }
 
 // NewAdminAuditVerifyHandler returns the GET /v1/admin/audit/verify
