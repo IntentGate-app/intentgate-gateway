@@ -269,6 +269,28 @@ type Input struct {
 	SessionID  string         `json:"session_id,omitempty"`
 	Intent     *InputIntent   `json:"intent,omitempty"`
 	Capability *InputCap      `json:"capability,omitempty"`
+	// EastWest is set only when the call is an agent-to-agent (east-west)
+	// call. Policies read input.east_west to condition a specific edge on
+	// the caller, the callee, and their zones (for example: deny any call
+	// into the finance zone unless the caller is in procurement). Nil on
+	// ordinary agent-to-tool calls.
+	EastWest *InputEastWest `json:"east_west,omitempty"`
+}
+
+// InputEastWest is the agent-to-agent shape of a call, exposed to policy.
+// Populated by the MCP handler from the east-west guard's resolution of the
+// call, so caller and callee zones are the same values the default-deny zone
+// gate used. Rego example:
+//
+//	deny if {
+//	    input.east_west.callee_zone == "finance"
+//	    input.east_west.caller_zone != "procurement"
+//	}
+type InputEastWest struct {
+	CallerAgent string `json:"caller_agent,omitempty"`
+	CallerZone  string `json:"caller_zone,omitempty"`
+	CalleeAgent string `json:"callee_agent,omitempty"`
+	CalleeZone  string `json:"callee_zone,omitempty"`
 }
 
 // InputIntent is the intent fields the policy can read.
@@ -292,6 +314,13 @@ type InputCap struct {
 	Subject string `json:"subject,omitempty"`
 	Issuer  string `json:"issuer,omitempty"`
 	Tenant  string `json:"tenant,omitempty"`
+	// Zone is the east-west segmentation zone from the signed capability
+	// token (see [capability.Token.Zone]). Policies can read
+	// input.capability.zone to gate north-south tool access by zone
+	// alongside the per-zone scope guard. Empty when the token carries no
+	// zone (pre-v4 tokens are not accepted, so in practice this is the
+	// caller's zone, defaulting to "default").
+	Zone string `json:"zone,omitempty"`
 	// StepUpAt is the unix-seconds timestamp of the most recent
 	// out-of-band step-up authentication (TOTP / WebAuthn / hardware
 	// key) on this capability token's chain. Sourced from the
