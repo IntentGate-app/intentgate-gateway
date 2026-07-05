@@ -101,9 +101,45 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		}
 		return nil
 
+	case CaveatCalleeAllow:
+		// Informational at this layer. The callee agent is not part of a
+		// north-south RequestContext, so this caveat is enforced in the
+		// east-west stage via Token.CanCall. We accept it as valid here so
+		// that signed tokens carrying an agent-to-agent allowlist aren't
+		// rejected by the capability stage.
+		return nil
+
 	default:
 		return fmt.Errorf("unknown caveat type %q (deny by default)", c.Type)
 	}
+}
+
+// CanCall reports whether this token's agent-to-agent caveats permit calling
+// the given callee agent (in calleeZone), and a reason when they do not.
+//
+// East-west authorization has two independent gates: the gateway's zone policy
+// (internal/eastwest) and this per-token allowlist. Both must permit the call.
+//
+// A token with no [CaveatCalleeAllow] is unrestricted here: the gateway zone
+// policy alone governs east-west. When one or more callee_allow caveats are
+// present, the callee must satisfy EVERY one of them, so attenuation only
+// narrows which agents a delegated child may call, never widens them. Within a
+// single caveat, the callee is permitted if its agent id is listed in Callees
+// OR its zone is listed in CalleeZones. A callee_allow caveat with both lists
+// empty permits nothing (fail closed).
+//
+// CanCall assumes Verify has already succeeded, exactly like Check.
+func (t *Token) CanCall(calleeAgent, calleeZone string) (bool, string) {
+	for _, c := range t.Caveats {
+		if c.Type != CaveatCalleeAllow {
+			continue
+		}
+		if contains(c.Callees, calleeAgent) || contains(c.CalleeZones, calleeZone) {
+			continue
+		}
+		return false, fmt.Sprintf("token does not permit calling agent %q (zone %q)", calleeAgent, calleeZone)
+	}
+	return true, ""
 }
 
 func contains(haystack []string, needle string) bool {

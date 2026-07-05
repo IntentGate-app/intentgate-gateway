@@ -317,6 +317,100 @@ func TestCaveatCount(t *testing.T) {
 	}
 }
 
+// --- Agent-to-agent (callee_allow) caveat ---------------------------------
+
+// A token with no callee_allow caveat is unrestricted east-west: the gateway
+// zone policy alone governs.
+func TestCanCall_UnrestrictedWhenNoCaveat(t *testing.T) {
+	key := mustKey(t)
+	tok, _ := Mint(key, MintOptions{Subject: "x", Zone: "procurement"})
+	if ok, reason := tok.CanCall("agent-finance", "finance"); !ok {
+		t.Fatalf("unrestricted token should allow any callee, got deny: %s", reason)
+	}
+}
+
+// A callee_allow caveat permits a listed agent and denies an unlisted one.
+func TestCanCall_AllowsListedAgentDeniesOthers(t *testing.T) {
+	key := mustKey(t)
+	tok, err := Mint(key, MintOptions{
+		Subject: "x", Zone: "procurement",
+		Caveats: []Caveat{{Type: CaveatCalleeAllow, Callees: []string{"agent-finance"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The caveat must not be rejected by the capability stage.
+	if err := tok.Verify(key); err != nil {
+		t.Fatalf("callee_allow token failed verify: %v", err)
+	}
+	if err := tok.Check(RequestContext{AgentID: "x", Tool: "read_invoice"}); err != nil {
+		t.Fatalf("callee_allow caveat should be accepted by Check, got: %v", err)
+	}
+	if ok, _ := tok.CanCall("agent-finance", "finance"); !ok {
+		t.Fatal("listed agent should be callable")
+	}
+	if ok, _ := tok.CanCall("agent-support", "support"); ok {
+		t.Fatal("unlisted agent should not be callable")
+	}
+}
+
+// A callee_allow caveat can permit by zone instead of by agent id.
+func TestCanCall_AllowsListedZone(t *testing.T) {
+	key := mustKey(t)
+	tok, _ := Mint(key, MintOptions{
+		Subject: "x", Zone: "procurement",
+		Caveats: []Caveat{{Type: CaveatCalleeAllow, CalleeZones: []string{"finance"}}},
+	})
+	if ok, _ := tok.CanCall("agent-anything", "finance"); !ok {
+		t.Fatal("callee in a permitted zone should be callable")
+	}
+	if ok, _ := tok.CanCall("agent-anything", "support"); ok {
+		t.Fatal("callee in a non-permitted zone should be denied")
+	}
+}
+
+// An empty callee_allow caveat permits nothing (fail closed).
+func TestCanCall_EmptyCaveatDeniesAll(t *testing.T) {
+	key := mustKey(t)
+	tok, _ := Mint(key, MintOptions{
+		Subject: "x", Zone: "procurement",
+		Caveats: []Caveat{{Type: CaveatCalleeAllow}},
+	})
+	if ok, _ := tok.CanCall("agent-finance", "finance"); ok {
+		t.Fatal("empty callee_allow should deny all east-west calls")
+	}
+}
+
+// Attenuation only narrows: a child adding a second callee_allow caveat can
+// call fewer agents than its parent, never more. The parent may call finance
+// and support; the child restricts to finance and so cannot call support.
+func TestCanCall_AttenuationNarrows(t *testing.T) {
+	key := mustKey(t)
+	parent, _ := Mint(key, MintOptions{
+		Subject: "x", Zone: "procurement",
+		Caveats: []Caveat{{Type: CaveatCalleeAllow, Callees: []string{"agent-finance", "agent-support"}}},
+	})
+	child, err := Attenuate(parent, Caveat{Type: CaveatCalleeAllow, Callees: []string{"agent-finance"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Verify(key); err != nil {
+		t.Fatalf("attenuated token failed verify: %v", err)
+	}
+	if ok, _ := child.CanCall("agent-finance", "finance"); !ok {
+		t.Fatal("child should still be able to call finance")
+	}
+	if ok, _ := child.CanCall("agent-support", "support"); ok {
+		t.Fatal("child must NOT be able to call support after narrowing")
+	}
+	// A child cannot widen: even though the child's own caveat lists support
+	// nowhere, adding a broader caveat cannot escape the parent's list either.
+	widen, _ := Attenuate(parent, Caveat{Type: CaveatCalleeAllow, Callees: []string{"agent-treasury"}})
+	if ok, _ := widen.CanCall("agent-treasury", "treasury"); ok {
+		t.Fatal("child must not call an agent the parent never permitted")
+	}
+}
+
 // --- Caveat evaluation ----------------------------------------------------
 
 func TestCheckExpiryRejectsExpired(t *testing.T) {
