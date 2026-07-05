@@ -303,6 +303,8 @@ func New(cfg Config) *http.Server {
 			KillSwitch:      cfg.KillSwitch,
 			Tasks:           cfg.Tasks,
 			AgentToolPrefix: cfg.AgentToolPrefix,
+			EastWest:        cfg.EastWest,
+			ZoneScope:       cfg.ZoneScope,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
 		// Task-level intent binding (goal-drift): read-only list + clear.

@@ -110,6 +110,13 @@ func (g *Guard) zone(agent string) string {
 	return ""
 }
 
+// ZoneOf returns the configured zone for an agent from the directory, or ""
+// when the agent has no entry. Exported for read-only surfaces (the flow-map
+// policy overlay) that need to place an agent without a live token.
+func (g *Guard) ZoneOf(agent string) string {
+	return g.zone(agent)
+}
+
 // Check decides whether callerAgent may call the given tool. If the tool is
 // not an agent-to-agent call, the result is Allow with EastWest=false, so the
 // caller can treat it as a pass-through.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/flowmap"
 )
 
@@ -100,5 +101,60 @@ func TestAdminFlowMap_ExtractsGraph(t *testing.T) {
 	// East-west edge support -> finance, derived from the agent: prefix, 1 block.
 	if ew == nil || ew.Kind != flowmap.EdgeEastWest || ew.Block != 1 {
 		t.Fatalf("east-west edge wrong: %+v", ew)
+	}
+}
+
+// With the east-west guard configured, the flow-map endpoint annotates each
+// east-west edge with the current policy verdict.
+func TestAdminFlowMap_PolicyOverlay(t *testing.T) {
+	ew := eastwest.New(eastwest.Config{
+		AgentToolPrefix: "agent:",
+		Zones: map[string]string{
+			"agent-support": "support",
+			"agent-finance": "finance",
+		},
+		// No allowed edges: support -> finance is default-denied.
+	})
+	cfg := AdminConfig{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AdminToken:      "secret",
+		AuditStore:      flowMapStore(t),
+		AgentToolPrefix: "agent:",
+		EastWest:        ew,
+	}
+	h := NewAdminFlowMapHandler(cfg)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/flow-map", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Graph struct {
+			Edges []struct {
+				From   string `json:"from"`
+				To     string `json:"to"`
+				Kind   string `json:"kind"`
+				Policy string `json:"policy"`
+			} `json:"edges"`
+		} `json:"graph"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found bool
+	for _, e := range resp.Graph.Edges {
+		if e.From == "agent-support" && e.To == "agent-finance" {
+			found = true
+			if e.Policy != "deny" {
+				t.Fatalf("east-west policy = %q, want deny (default-deny)", e.Policy)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("east-west edge not present in response")
 	}
 }
