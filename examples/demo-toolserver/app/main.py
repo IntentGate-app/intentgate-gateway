@@ -532,6 +532,23 @@ async def jsonrpc(request: Request) -> JSONResponse:
         args = params.get("arguments") or {}
         fn = TOOL_DISPATCH.get(name)
         if fn is None:
+            # East-west (agent-to-agent) call: the gateway has already
+            # authorized this hop through the zone model by the time it
+            # forwards here, so the callee agent simply acknowledges. This
+            # lets an ALLOWED agent-to-agent edge render green on the flow
+            # map without a dedicated stub per agent. Denied edges never
+            # reach the tool server — the gateway blocks them first.
+            if isinstance(name, str) and name.startswith("agent:"):
+                return JSONResponse(
+                    content=_result(
+                        req_id,
+                        {
+                            "ok": True,
+                            "callee": name[len("agent:") :],
+                            "_note": "demo agent-to-agent ack",
+                        },
+                    ),
+                )
             return JSONResponse(
                 content=_error(req_id, METHOD_NOT_FOUND, f"unknown tool: {name}"),
             )
