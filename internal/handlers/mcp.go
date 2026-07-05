@@ -428,7 +428,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 				"tool", params.Name, "check", "action", "agent", capResult.agentID,
 				"rule", agRes.Rule, "reason", agRes.Reason)
 			h.emitAudit(ctx, r, params, capResult, intResult,
-				audit.DecisionBlock, audit.CheckPolicy,
+				audit.DecisionBlock, audit.CheckActionGuard,
 				fmt.Sprintf("action guard blocked (%s): %s", agRes.Rule, agRes.Reason), start, 0)
 			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 				"action guard blocked", agRes.Reason)
@@ -467,7 +467,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 					"callee", ewRes.CalleeAgent, "caller_zone", ewRes.CallerZone,
 					"callee_zone", ewRes.CalleeZone, "reason", ewRes.Reason)
 				h.emitAudit(ctx, r, params, capResult, intResult,
-					audit.DecisionBlock, audit.CheckPolicy,
+					audit.DecisionBlock, audit.CheckEastWest,
 					fmt.Sprintf("east-west denied: %s", ewRes.Reason), start, 0)
 				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 					"east-west denied", ewRes.Reason)
@@ -482,7 +482,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 						"tool", params.Name, "check", "eastwest_token", "agent", capResult.agentID,
 						"callee", ewRes.CalleeAgent, "callee_zone", ewRes.CalleeZone, "reason", reason)
 					h.emitAudit(ctx, r, params, capResult, intResult,
-						audit.DecisionBlock, audit.CheckPolicy,
+						audit.DecisionBlock, audit.CheckEastWest,
 						fmt.Sprintf("east-west denied by token: %s", reason), start, 0)
 					return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 						"east-west denied", reason)
@@ -505,7 +505,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 					"tool", params.Name, "check", "zonescope", "agent", capResult.agentID,
 					"zone", callerZone, "tenant", callerTenant, "reason", zsRes.Reason)
 				h.emitAudit(ctx, r, params, capResult, intResult,
-					audit.DecisionBlock, audit.CheckPolicy,
+					audit.DecisionBlock, audit.CheckZoneScope,
 					fmt.Sprintf("zone scope denied: %s", zsRes.Reason), start, 0)
 				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 					"zone scope denied", zsRes.Reason)

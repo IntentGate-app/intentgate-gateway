@@ -23,6 +23,11 @@ type Call struct {
 	Tool     string
 	Tenant   string
 	Decision string // "allow", "block", or "escalate"
+	// Check is the pipeline stage that produced this decision, from the audit
+	// event (for example "capability", "east_west", "zone_scope", "policy",
+	// "budget"). Empty for an allow that cleared every stage. Used to
+	// attribute each edge to the stage that decided it.
+	Check string
 }
 
 // Config configures edge extraction.
@@ -68,12 +73,33 @@ type Edge struct {
 	Total    int      `json:"total"`
 	// Tenants is the distinct set of tenants seen on this edge, sorted.
 	Tenants []string `json:"tenants,omitempty"`
+	// DecidedAt is the pipeline stage that owns this edge for the "flows
+	// decided here" view: the stage that blocked it if any calls were
+	// blocked, else the stage that escalated it, else "policy" (the stage an
+	// allowed call is attributed to). One of the audit check strings.
+	DecidedAt string `json:"decided_at,omitempty"`
 }
 
 // Graph is the extracted topology, with nodes and edges in a stable order.
 type Graph struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
+}
+
+// dominant returns the most frequent key in a count map, ties broken
+// alphabetically for determinism. Empty map yields "policy".
+func dominant(m map[string]int) string {
+	best := ""
+	bestN := -1
+	for k, n := range m {
+		if n > bestN || (n == bestN && k < best) {
+			best, bestN = k, n
+		}
+	}
+	if best == "" {
+		return "policy"
+	}
+	return best
 }
 
 // agentTarget reports whether tool is an agent-to-agent target and, when it
@@ -107,6 +133,8 @@ func Extract(cfg Config, calls []Call) Graph {
 	type key struct{ from, to string }
 	edges := map[key]*Edge{}
 	tenantSeen := map[key]map[string]bool{}
+	blockChk := map[key]map[string]int{}
+	escChk := map[key]map[string]int{}
 
 	for _, c := range calls {
 		if c.Agent == "" || c.Tool == "" {
@@ -136,13 +164,25 @@ func Extract(cfg Config, calls []Call) Graph {
 			edges[k] = e
 			tenantSeen[k] = map[string]bool{}
 		}
+		chk := c.Check
+		if chk == "" {
+			chk = "policy"
+		}
 		switch c.Decision {
 		case "allow":
 			e.Allow++
 		case "block":
 			e.Block++
+			if blockChk[k] == nil {
+				blockChk[k] = map[string]int{}
+			}
+			blockChk[k][chk]++
 		case "escalate":
 			e.Escalate++
+			if escChk[k] == nil {
+				escChk[k] = map[string]int{}
+			}
+			escChk[k][chk]++
 		}
 		e.Total++
 		if c.Tenant != "" && !tenantSeen[k][c.Tenant] {
@@ -162,6 +202,15 @@ func Extract(cfg Config, calls []Call) Graph {
 	for k := range edges {
 		e := edges[k]
 		sort.Strings(e.Tenants)
+		// Attribute the edge to the stage that owns it: the blocking stage if
+		// anything was blocked, else the escalating stage, else policy.
+		if e.Block > 0 {
+			e.DecidedAt = dominant(blockChk[k])
+		} else if e.Escalate > 0 {
+			e.DecidedAt = dominant(escChk[k])
+		} else {
+			e.DecidedAt = "policy"
+		}
 		g.Edges = append(g.Edges, *e)
 	}
 	sort.Slice(g.Edges, func(i, j int) bool {

@@ -656,6 +656,7 @@ func eventsToCalls(events []audit.Event) []flowmap.Call {
 			Tool:     e.Tool,
 			Tenant:   e.Tenant,
 			Decision: string(e.Decision),
+			Check:    string(e.Check),
 		})
 	}
 	return calls

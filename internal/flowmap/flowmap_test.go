@@ -117,6 +117,29 @@ func TestExtract_NoPrefixMeansAllNorthSouth(t *testing.T) {
 	}
 }
 
+// Each edge is attributed to the stage that decided it.
+func TestExtract_DecidedAt(t *testing.T) {
+	g := Extract(cfg(), []Call{
+		// blocked at east-west
+		{Agent: "agent-support", Tool: "agent:agent-finance", Decision: "block", Check: "east_west"},
+		// blocked at zone_scope
+		{Agent: "agent-support", Tool: "transfer_funds", Decision: "block", Check: "zone_scope"},
+		// allowed (no check) -> policy
+		{Agent: "agent-finance", Tool: "read_invoice", Decision: "allow"},
+	})
+	want := map[string]string{
+		"agent-support>agent-finance":  "east_west",
+		"agent-support>transfer_funds": "zone_scope",
+		"agent-finance>read_invoice":   "policy",
+	}
+	for _, e := range g.Edges {
+		k := e.From + ">" + e.To
+		if want[k] != "" && e.DecidedAt != want[k] {
+			t.Fatalf("edge %s decided_at = %q, want %q", k, e.DecidedAt, want[k])
+		}
+	}
+}
+
 // Output is deterministic: nodes and edges are sorted.
 func TestExtract_DeterministicOrder(t *testing.T) {
 	g := Extract(cfg(), []Call{

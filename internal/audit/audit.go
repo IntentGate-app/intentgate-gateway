@@ -67,9 +67,20 @@ const (
 	// has provenance enabled. See internal/provenance and the design
 	// doc at memos/aai03-memory-provenance-design.md.
 	CheckProvenance Check = "provenance"
-	CheckPolicy     Check = "policy"
-	CheckBudget     Check = "budget"
-	CheckUpstream   Check = "upstream"
+	// CheckActionGuard is the effect-level hold (Semantic Action Resolver +
+	// mandatory hold + plan-level correlation). Runs before policy; blocks or
+	// escalates irreversible high-value and create-then-pay actions.
+	CheckActionGuard Check = "action_guard"
+	// CheckEastWest is the agent-to-agent (east-west) zone authorization
+	// (agent-as-tool model, default-deny). Blocks a call from one agent to
+	// another when no zone edge or token allowlist permits it.
+	CheckEastWest Check = "east_west"
+	// CheckZoneScope is the per-zone north-south tool scope. Blocks a call to
+	// a tool the caller's zone is not scoped to reach.
+	CheckZoneScope Check = "zone_scope"
+	CheckPolicy    Check = "policy"
+	CheckBudget    Check = "budget"
+	CheckUpstream  Check = "upstream"
 	// CheckPII is the response-stream PII filter (LLM02). Unlike the
 	// other checks which evaluate the request, CheckPII events
 	// describe the gateway's decision on what the upstream tool
