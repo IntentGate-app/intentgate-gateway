@@ -30,6 +30,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
+	"github.com/IntentGate-app/intentgate-gateway/internal/zonescope"
 )
 
 // MCPHandlerConfig configures the /v1/mcp handler.
@@ -119,6 +120,12 @@ type MCPHandlerConfig struct {
 	// the policy stage. nil disables the check, and ordinary tool calls are
 	// a no-op regardless. See internal/eastwest.
 	EastWest *eastwest.Guard
+	// ZoneScope enforces per-zone north-south scope on ordinary agent-to-tool
+	// calls: which tools, and in which tenants, an agent in a given zone may
+	// reach. Runs before the policy stage, after the east-west check, and only
+	// on non-east-west calls. nil disables the check, and a zone with no
+	// configured scope is a no-op. See internal/zonescope.
+	ZoneScope *zonescope.Guard
 	// ApprovalTimeout caps how long the handler waits for a human
 	// decision before timing out and returning block. Zero falls
 	// back to 5 minutes — operators with on-call humans can lower
@@ -432,21 +439,26 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 		}
 	}
 
+	// Caller zone and tenant for the segmentation checks. Both come from the
+	// signed capability token when present, so they are authoritative and
+	// cannot be forged. The east-west guard falls back to its config
+	// directory when the token carries no zone.
+	var callerZone, callerTenant string
+	if capResult.token != nil {
+		callerZone = capResult.token.Zone
+		callerTenant = capResult.token.Tenant
+	}
+
 	// Check 3d: east-west authorization (agent-to-agent). In the agent-as-tool
 	// model, a call to a tool named like an agent target is one agent calling
 	// another; the guard applies a zone model with default-deny so a
 	// compromised agent cannot recruit agents in other zones. No-op when
 	// EastWest is nil or the call is not an agent-to-agent call.
+	eastWestCall := false
 	if h.cfg.EastWest != nil {
 		ewStart := time.Now()
-		// Caller zone comes from the signed capability token when present,
-		// so it is authoritative and cannot be forged. The guard falls back
-		// to its config directory when the token carries no zone.
-		var callerZone string
-		if capResult.token != nil {
-			callerZone = capResult.token.Zone
-		}
 		ewRes := h.cfg.EastWest.Check(capResult.agentID, callerZone, params.Name)
+		eastWestCall = ewRes.EastWest
 		if ewRes.EastWest {
 			h.cfg.Metrics.ObserveCheck("eastwest", string(ewRes.Verdict), time.Since(ewStart))
 			if ewRes.Verdict == eastwest.VerdictDeny {
@@ -459,6 +471,28 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 					fmt.Sprintf("east-west denied: %s", ewRes.Reason), start, 0)
 				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 					"east-west denied", ewRes.Reason)
+			}
+		}
+	}
+
+	// Check 3e: per-zone north-south scope (agent-to-tool). The caller zone's
+	// allowlist governs which tools, and in which tenants, it may reach.
+	// Skipped for east-west calls, which the east-west guard already governs.
+	// No-op when ZoneScope is nil or the caller's zone has no configured scope.
+	if h.cfg.ZoneScope != nil && !eastWestCall {
+		zsStart := time.Now()
+		zsRes := h.cfg.ZoneScope.Check(callerZone, callerTenant, params.Name)
+		if zsRes.Enforced {
+			h.cfg.Metrics.ObserveCheck("zonescope", string(zsRes.Verdict), time.Since(zsStart))
+			if zsRes.Verdict == zonescope.VerdictDeny {
+				h.cfg.Logger.Info("mcp tools/call blocked",
+					"tool", params.Name, "check", "zonescope", "agent", capResult.agentID,
+					"zone", callerZone, "tenant", callerTenant, "reason", zsRes.Reason)
+				h.emitAudit(ctx, r, params, capResult, intResult,
+					audit.DecisionBlock, audit.CheckPolicy,
+					fmt.Sprintf("zone scope denied: %s", zsRes.Reason), start, 0)
+				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+					"zone scope denied", zsRes.Reason)
 			}
 		}
 	}

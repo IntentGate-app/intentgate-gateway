@@ -28,6 +28,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
+	"github.com/IntentGate-app/intentgate-gateway/internal/zonescope"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -180,6 +181,11 @@ type Config struct {
 	// guard: a zone model with default-deny. nil disables the check.
 	// Constructed at startup from INTENTGATE_EASTWEST_*. See internal/eastwest.
 	EastWest *eastwest.Guard
+	// ZoneScope is the optional per-zone north-south scope guard: which tools
+	// and tenants each zone may reach on ordinary tool calls. nil disables the
+	// check. Constructed at startup from INTENTGATE_ZONE_SCOPE_*. See
+	// internal/zonescope.
+	ZoneScope *zonescope.Guard
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -251,6 +257,7 @@ func New(cfg Config) *http.Server {
 		FaultIsolation:    cfg.FaultIsolation,
 		ActionGuard:       cfg.ActionGuard,
 		EastWest:          cfg.EastWest,
+		ZoneScope:         cfg.ZoneScope,
 	}))
 
 	// Reply-side outbound gateway (A1). Inspects the agent's proposed
