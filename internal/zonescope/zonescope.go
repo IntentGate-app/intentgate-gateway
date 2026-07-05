@@ -73,6 +73,7 @@ type Result struct {
 type Guard struct {
 	mu     sync.RWMutex
 	scopes map[string]compiledScope
+	cfg    Config // retained for Snapshot (read-only surfaces)
 }
 
 type compiledScope struct {
@@ -101,7 +102,28 @@ func New(cfg Config) *Guard {
 		}
 		scopes[zone] = cs
 	}
-	return &Guard{scopes: scopes}
+	return &Guard{scopes: scopes, cfg: cfg}
+}
+
+// Snapshot returns a deep copy of the guard's configuration, for read-only
+// surfaces that render the current segmentation. Mutating the result does not
+// affect the guard.
+func (g *Guard) Snapshot() Config {
+	out := Config{}
+	if g.cfg.Scopes != nil {
+		out.Scopes = make(map[string]Scope, len(g.cfg.Scopes))
+		for zone, s := range g.cfg.Scopes {
+			cp := Scope{}
+			if s.Tools != nil {
+				cp.Tools = append([]string(nil), s.Tools...)
+			}
+			if s.Tenants != nil {
+				cp.Tenants = append([]string(nil), s.Tenants...)
+			}
+			out.Scopes[zone] = cp
+		}
+	}
+	return out
 }
 
 // Check decides whether an agent in the given zone may call tool within tenant.

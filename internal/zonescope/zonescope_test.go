@@ -83,3 +83,20 @@ func TestCheck_NoTenantRestrictionAllowsAnyTenant(t *testing.T) {
 		t.Fatalf("support has no tenant restriction, got %s (%s)", r.Verdict, r.Reason)
 	}
 }
+
+// Snapshot round-trips the config and is a copy (mutating it is inert).
+func TestSnapshot(t *testing.T) {
+	g := New(base())
+	snap := g.Snapshot()
+	if got := snap.Scopes["support"].Tools; len(got) != 2 || got[0] != "read_invoice" {
+		t.Fatalf("snapshot support tools = %v", got)
+	}
+	if got := snap.Scopes["finance"].Tenants; len(got) != 1 || got[0] != "acme" {
+		t.Fatalf("snapshot finance tenants = %v", got)
+	}
+	// Mutating the snapshot must not change the guard's decision.
+	snap.Scopes["support"].Tools[0] = "mutated"
+	if r := g.Check("support", "acme", "read_invoice"); r.Verdict != VerdictAllow {
+		t.Fatalf("guard changed after mutating snapshot: %s", r.Verdict)
+	}
+}
