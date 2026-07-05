@@ -472,6 +472,22 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 					"east-west denied", ewRes.Reason)
 			}
+			// Second east-west gate: the caller token's own agent-to-agent
+			// allowlist (CaveatCalleeAllow). The zone policy above and this
+			// per-token allowlist are independent; both must permit the call.
+			// A token with no callee_allow caveat is unrestricted here.
+			if capResult.token != nil {
+				if ok, reason := capResult.token.CanCall(ewRes.CalleeAgent, ewRes.CalleeZone); !ok {
+					h.cfg.Logger.Info("mcp tools/call blocked",
+						"tool", params.Name, "check", "eastwest_token", "agent", capResult.agentID,
+						"callee", ewRes.CalleeAgent, "callee_zone", ewRes.CalleeZone, "reason", reason)
+					h.emitAudit(ctx, r, params, capResult, intResult,
+						audit.DecisionBlock, audit.CheckPolicy,
+						fmt.Sprintf("east-west denied by token: %s", reason), start, 0)
+					return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+						"east-west denied", reason)
+				}
+			}
 		}
 	}
 

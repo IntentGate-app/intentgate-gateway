@@ -99,6 +99,10 @@ func cmdMint(args []string) {
 		"issuer name (default: intentgate)")
 	zone := fs.String("zone", "",
 		"east-west segmentation zone for this agent (default: default)")
+	callees := fs.String("callees", "",
+		"comma-separated callee agent ids this token may call (east-west allowlist)")
+	calleeZones := fs.String("callee-zones", "",
+		"comma-separated callee zones this token may call (east-west allowlist)")
 	pretty := fs.Bool("pretty", false,
 		"also print the decoded token to stderr for inspection")
 	if err := fs.Parse(args); err != nil {
@@ -130,6 +134,13 @@ func cmdMint(args []string) {
 		caveats = append(caveats, capability.Caveat{
 			Type:     capability.CaveatMaxCalls,
 			MaxCalls: *maxCalls,
+		})
+	}
+	if *callees != "" || *calleeZones != "" {
+		caveats = append(caveats, capability.Caveat{
+			Type:        capability.CaveatCalleeAllow,
+			Callees:     splitCSV(*callees),
+			CalleeZones: splitCSV(*calleeZones),
 		})
 	}
 
