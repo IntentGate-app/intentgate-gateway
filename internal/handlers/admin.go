@@ -248,6 +248,7 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			Subject    string   `json:"subject"`
 			Issuer     string   `json:"issuer"`
 			Tenant     string   `json:"tenant"`
+			Zone       string   `json:"zone"`
 			TTLSeconds int64    `json:"ttl_seconds"`
 			Tools      []string `json:"tools"`
 			MaxCalls   int      `json:"max_calls"`
@@ -301,6 +302,7 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 		opts := capability.MintOptions{
 			Issuer:  strings.TrimSpace(body.Issuer),
 			Tenant:  tenant,
+			Zone:    strings.TrimSpace(body.Zone),
 			Subject: body.Subject,
 		}
 		if body.TTLSeconds > 0 {

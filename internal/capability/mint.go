@@ -21,6 +21,13 @@ type MintOptions struct {
 	// think about it. Multi-tenant operators set this on every Mint
 	// to anchor the token in a specific tenancy.
 	Tenant string
+	// Zone is the east-west segmentation zone this agent belongs to
+	// ("finance", "procurement"). Empty defaults to [DefaultZone] so
+	// deployments that don't use east-west segmentation don't have to
+	// think about it. Operators running segmentation set this on every
+	// Mint to place the agent in a zone; the east-west guard reads it as
+	// the authoritative caller zone.
+	Zone string
 	// Subject is the agent ID this token is bound to. Required.
 	Subject string
 	// NotBefore, if non-zero, is enforced via the iat/nbf timestamps.
@@ -61,6 +68,11 @@ func Mint(masterKey []byte, opts MintOptions) (*Token, error) {
 		tenant = DefaultTenant
 	}
 
+	zone := opts.Zone
+	if zone == "" {
+		zone = DefaultZone
+	}
+
 	now := time.Now().UTC().Unix()
 	t := &Token{
 		Version: SchemaVersion,
@@ -71,6 +83,7 @@ func Mint(masterKey []byte, opts MintOptions) (*Token, error) {
 		RootID:   id,
 		Issuer:   issuer,
 		Tenant:   tenant,
+		Zone:     zone,
 		Subject:  opts.Subject,
 		IssuedAt: now,
 	}
@@ -132,6 +145,9 @@ func Attenuate(parent *Token, c Caveat) (*Token, error) {
 	}
 	if parent.Tenant == "" {
 		return nil, errors.New("parent token has no tenant (was it minted by gateway < v0.9?)")
+	}
+	if parent.Zone == "" {
+		return nil, errors.New("parent token has no zone (was it minted by gateway < v1.0?)")
 	}
 	parentSig, err := base64.RawURLEncoding.DecodeString(parent.Signature)
 	if err != nil {

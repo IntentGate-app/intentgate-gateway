@@ -97,6 +97,8 @@ func cmdMint(args []string) {
 		"maximum total tool-calls allowed for this token (0 = unlimited)")
 	issuer := fs.String("issuer", "",
 		"issuer name (default: intentgate)")
+	zone := fs.String("zone", "",
+		"east-west segmentation zone for this agent (default: default)")
 	pretty := fs.Bool("pretty", false,
 		"also print the decoded token to stderr for inspection")
 	if err := fs.Parse(args); err != nil {
@@ -134,6 +136,7 @@ func cmdMint(args []string) {
 	opts := capability.MintOptions{
 		Issuer:  *issuer,
 		Subject: *subject,
+		Zone:    *zone,
 		Caveats: caveats,
 	}
 	if *ttl > 0 {

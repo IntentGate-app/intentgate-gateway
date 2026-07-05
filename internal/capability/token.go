@@ -51,7 +51,14 @@ import (
 // stolen token from tenant A to tenant B without the master key.
 // v2 tokens are NOT accepted by v3 verifiers. There is no in-flight
 // migration: redeploy the gateway at v0.9, re-mint outstanding tokens.
-const SchemaVersion = 3
+//
+// v4 (gateway 1.0+) adds [Token.Zone] so an agent's east-west
+// segmentation zone travels with its signed identity. The zone claim
+// is signed in the canonicalPayload, so a compromised agent cannot
+// relabel its own zone to escape containment and reach agents in other
+// zones. v3 tokens are NOT accepted by v4 verifiers: redeploy the
+// gateway at v1.0, re-mint outstanding tokens.
+const SchemaVersion = 4
 
 // Token is the on-wire and in-memory representation of a capability.
 //
@@ -78,7 +85,15 @@ type Token struct {
 	// Mint defaults this to "default" when the caller doesn't set
 	// one — single-tenant deployments stay simple while multi-tenant
 	// deployments get isolation.
-	Tenant    string   `json:"tenant"`
+	Tenant string `json:"tenant"`
+	// Zone is the east-west segmentation zone this agent belongs to
+	// ("finance", "procurement", "default"). Signed in the
+	// canonicalPayload so a compromised agent cannot relabel its own
+	// zone to reach agents in other zones. Mint defaults this to
+	// [DefaultZone] when the caller doesn't set one, so deployments that
+	// don't use east-west segmentation stay simple. The east-west guard
+	// treats this as the authoritative caller zone.
+	Zone      string   `json:"zone"`
 	Subject   string   `json:"sub"`
 	IssuedAt  int64    `json:"iat"`
 	NotBefore int64    `json:"nbf,omitempty"`
@@ -90,6 +105,13 @@ type Token struct {
 // empty. Single-tenant deployments live entirely in this namespace
 // without explicit configuration.
 const DefaultTenant = "default"
+
+// DefaultZone is the value Mint stamps when MintOptions.Zone is empty.
+// Deployments that don't use east-west segmentation live entirely in
+// this zone without explicit configuration. It is a normal zone: the
+// east-west guard's AllowIntraZone still governs default-to-default
+// agent-to-agent calls.
+const DefaultZone = "default"
 
 // Caveat type identifiers. New types must be added here AND handled in
 // the evaluator (see check.go); unknown types are denied by default.
@@ -158,6 +180,7 @@ func (t *Token) canonicalPayload() ([]byte, error) {
 		RootID    string `json:"root_jti"`
 		Issuer    string `json:"iss"`
 		Tenant    string `json:"tenant"`
+		Zone      string `json:"zone"`
 		Subject   string `json:"sub"`
 		IssuedAt  int64  `json:"iat"`
 		NotBefore int64  `json:"nbf,omitempty"`
@@ -167,6 +190,7 @@ func (t *Token) canonicalPayload() ([]byte, error) {
 		RootID:    t.RootID,
 		Issuer:    t.Issuer,
 		Tenant:    t.Tenant,
+		Zone:      t.Zone,
 		Subject:   t.Subject,
 		IssuedAt:  t.IssuedAt,
 		NotBefore: t.NotBefore,
@@ -201,6 +225,9 @@ func (t *Token) Validate() error {
 	}
 	if t.Tenant == "" {
 		return errors.New("token tenant is required")
+	}
+	if t.Zone == "" {
+		return errors.New("token zone is required")
 	}
 	return nil
 }
