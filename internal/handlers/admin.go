@@ -245,14 +245,16 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 		}
 
 		var body struct {
-			Subject    string   `json:"subject"`
-			Issuer     string   `json:"issuer"`
-			Tenant     string   `json:"tenant"`
-			Zone       string   `json:"zone"`
-			TTLSeconds int64    `json:"ttl_seconds"`
-			Tools      []string `json:"tools"`
-			MaxCalls   int      `json:"max_calls"`
-			StepUp     bool     `json:"step_up"`
+			Subject     string   `json:"subject"`
+			Issuer      string   `json:"issuer"`
+			Tenant      string   `json:"tenant"`
+			Zone        string   `json:"zone"`
+			TTLSeconds  int64    `json:"ttl_seconds"`
+			Tools       []string `json:"tools"`
+			MaxCalls    int      `json:"max_calls"`
+			StepUp      bool     `json:"step_up"`
+			Callees     []string `json:"callees"`
+			CalleeZones []string `json:"callee_zones"`
 			// WithMemorySigningKey opts the response into including
 			// the AAI03 memory-provenance signing key derived from
 			// the master key + this token's jti. Default false —
@@ -337,6 +339,26 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			opts.Caveats = append(opts.Caveats, capability.Caveat{
 				Type:     capability.CaveatStepUp,
 				StepUpAt: time.Now().UTC().Unix(),
+			})
+		}
+		// De-empty the east-west allowlist entries so a stray "" cannot
+		// slip into the caveat.
+		var callees, calleeZones []string
+		for _, c := range body.Callees {
+			if c = strings.TrimSpace(c); c != "" {
+				callees = append(callees, c)
+			}
+		}
+		for _, z := range body.CalleeZones {
+			if z = strings.TrimSpace(z); z != "" {
+				calleeZones = append(calleeZones, z)
+			}
+		}
+		if len(callees) > 0 || len(calleeZones) > 0 {
+			opts.Caveats = append(opts.Caveats, capability.Caveat{
+				Type:        capability.CaveatCalleeAllow,
+				Callees:     callees,
+				CalleeZones: calleeZones,
 			})
 		}
 
