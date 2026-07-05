@@ -253,6 +253,60 @@ func TestAttenuatePreservesTenant(t *testing.T) {
 	}
 }
 
+func TestMintDefaultsZone(t *testing.T) {
+	key := mustKey(t)
+	tok, err := Mint(key, MintOptions{Subject: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Zone != DefaultZone {
+		t.Errorf("zone=%q want %q", tok.Zone, DefaultZone)
+	}
+	if err := tok.Verify(key); err != nil {
+		t.Errorf("default-zone token failed verify: %v", err)
+	}
+}
+
+func TestMintAcceptsCustomZone(t *testing.T) {
+	key := mustKey(t)
+	tok, err := Mint(key, MintOptions{Subject: "x", Zone: "finance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.Zone != "finance" {
+		t.Errorf("zone=%q want finance", tok.Zone)
+	}
+	if err := tok.Verify(key); err != nil {
+		t.Errorf("custom-zone token failed verify: %v", err)
+	}
+}
+
+// A compromised agent cannot relabel its own zone to escape containment:
+// the zone is signed in the chain, so tampering breaks verification.
+func TestVerifyDetectsZoneTamper(t *testing.T) {
+	key := mustKey(t)
+	tok, _ := Mint(key, MintOptions{Subject: "x", Zone: "support"})
+	tok.Zone = "finance"
+	if err := tok.Verify(key); err == nil {
+		t.Fatal("expected verify failure on cross-zone relabel")
+	}
+}
+
+func TestAttenuatePreservesZone(t *testing.T) {
+	key := mustKey(t)
+	parent, _ := Mint(key, MintOptions{Subject: "x", Zone: "finance"})
+	child, err := Attenuate(parent, Caveat{Type: CaveatToolWhitelist, Tools: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Zone != "finance" {
+		t.Errorf("child.Zone=%q want finance", child.Zone)
+	}
+	if err := child.Verify(key); err != nil {
+		t.Errorf("attenuated token failed verify: %v", err)
+	}
+}
+
 func TestCaveatCount(t *testing.T) {
 	key := mustKey(t)
 	root, _ := Mint(key, MintOptions{Subject: "x"})
