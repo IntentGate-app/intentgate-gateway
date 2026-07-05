@@ -17,6 +17,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
@@ -112,6 +113,12 @@ type MCPHandlerConfig struct {
 	// the Rego policy stage. nil disables the stage entirely, leaving the
 	// four-check pipeline unchanged. See internal/actionguard.
 	ActionGuard *actionguard.Guard
+	// EastWest authorizes agent-to-agent (east-west) calls in the
+	// agent-as-tool model: a zone model with default-deny that keeps a
+	// compromised agent from recruiting agents in other zones. Runs before
+	// the policy stage. nil disables the check, and ordinary tool calls are
+	// a no-op regardless. See internal/eastwest.
+	EastWest *eastwest.Guard
 	// ApprovalTimeout caps how long the handler waits for a human
 	// decision before timing out and returning block. Zero falls
 	// back to 5 minutes — operators with on-call humans can lower
@@ -421,6 +428,30 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 		case actionguard.VerdictEscalate:
 			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, agRes.Reason, false, start); escResp != nil {
 				return escResp
+			}
+		}
+	}
+
+	// Check 3d: east-west authorization (agent-to-agent). In the agent-as-tool
+	// model, a call to a tool named like an agent target is one agent calling
+	// another; the guard applies a zone model with default-deny so a
+	// compromised agent cannot recruit agents in other zones. No-op when
+	// EastWest is nil or the call is not an agent-to-agent call.
+	if h.cfg.EastWest != nil {
+		ewStart := time.Now()
+		ewRes := h.cfg.EastWest.Check(capResult.agentID, params.Name)
+		if ewRes.EastWest {
+			h.cfg.Metrics.ObserveCheck("eastwest", string(ewRes.Verdict), time.Since(ewStart))
+			if ewRes.Verdict == eastwest.VerdictDeny {
+				h.cfg.Logger.Info("mcp tools/call blocked",
+					"tool", params.Name, "check", "eastwest", "agent", capResult.agentID,
+					"callee", ewRes.CalleeAgent, "caller_zone", ewRes.CallerZone,
+					"callee_zone", ewRes.CalleeZone, "reason", ewRes.Reason)
+				h.emitAudit(ctx, r, params, capResult, intResult,
+					audit.DecisionBlock, audit.CheckPolicy,
+					fmt.Sprintf("east-west denied: %s", ewRes.Reason), start, 0)
+				return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+					"east-west denied", ewRes.Reason)
 			}
 		}
 	}

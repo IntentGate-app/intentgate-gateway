@@ -13,6 +13,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/handlers"
@@ -175,6 +176,10 @@ type Config struct {
 	// disables the stage; the gateway pipeline is unchanged. Constructed
 	// at startup from INTENTGATE_ACTION_GUARD_*. See internal/actionguard.
 	ActionGuard *actionguard.Guard
+	// EastWest is the optional agent-to-agent (east-west) authorization
+	// guard: a zone model with default-deny. nil disables the check.
+	// Constructed at startup from INTENTGATE_EASTWEST_*. See internal/eastwest.
+	EastWest *eastwest.Guard
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -245,6 +250,7 @@ func New(cfg Config) *http.Server {
 		TenantScope:       cfg.TenantScope,
 		FaultIsolation:    cfg.FaultIsolation,
 		ActionGuard:       cfg.ActionGuard,
+		EastWest:          cfg.EastWest,
 	}))
 
 	// Reply-side outbound gateway (A1). Inspects the agent's proposed

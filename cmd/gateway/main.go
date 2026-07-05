@@ -166,6 +166,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
@@ -251,6 +252,14 @@ func main() {
 	actionGuardEnabled := envOr("INTENTGATE_ACTION_GUARD_ENABLED", "") == "true"
 	actionGuardEscalateOverCentsRaw := envOr("INTENTGATE_ACTION_GUARD_ESCALATE_OVER_CENTS", "500000")
 	actionGuardBlockUnboundedDelete := envOr("INTENTGATE_ACTION_GUARD_BLOCK_UNBOUNDED_DELETE", "true") != "false"
+	// East-west (agent-to-agent) authorization. Off by default. When enabled,
+	// a call to a tool named "<prefix><agent-id>" is treated as an agent-to-
+	// agent call and evaluated against a zone model with default-deny. The
+	// zones and allowed edges are loaded from a JSON file at
+	// INTENTGATE_EASTWEST_CONFIG. See internal/eastwest.
+	eastWestEnabled := envOr("INTENTGATE_EASTWEST_ENABLED", "") == "true"
+	eastWestPrefix := envOr("INTENTGATE_EASTWEST_AGENT_PREFIX", "agent:")
+	eastWestConfigPath := envOr("INTENTGATE_EASTWEST_CONFIG", "")
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -456,6 +465,42 @@ func main() {
 		)
 	} else {
 		logger.Info("action guard not configured (set INTENTGATE_ACTION_GUARD_ENABLED=true to enable)")
+	}
+
+	var eastWest *eastwest.Guard
+	if eastWestEnabled {
+		ewCfg := eastwest.Config{AgentToolPrefix: eastWestPrefix}
+		if eastWestConfigPath != "" {
+			raw, err := os.ReadFile(eastWestConfigPath)
+			if err != nil {
+				logger.Error("cannot read INTENTGATE_EASTWEST_CONFIG", "path", eastWestConfigPath, "err", err)
+				os.Exit(1)
+			}
+			var fileCfg struct {
+				AgentToolPrefix string            `json:"agent_tool_prefix"`
+				AllowIntraZone  bool              `json:"allow_intra_zone"`
+				Zones           map[string]string `json:"zones"`
+				AllowedEdges    [][2]string       `json:"allowed_edges"`
+			}
+			if err := json.Unmarshal(raw, &fileCfg); err != nil {
+				logger.Error("invalid INTENTGATE_EASTWEST_CONFIG JSON", "err", err)
+				os.Exit(1)
+			}
+			if fileCfg.AgentToolPrefix != "" {
+				ewCfg.AgentToolPrefix = fileCfg.AgentToolPrefix
+			}
+			ewCfg.AllowIntraZone = fileCfg.AllowIntraZone
+			ewCfg.Zones = fileCfg.Zones
+			ewCfg.AllowedEdges = fileCfg.AllowedEdges
+		}
+		eastWest = eastwest.New(ewCfg)
+		logger.Info("east-west authorization enabled",
+			"agent_tool_prefix", ewCfg.AgentToolPrefix,
+			"zones", len(ewCfg.Zones),
+			"allowed_edges", len(ewCfg.AllowedEdges),
+			"allow_intra_zone", ewCfg.AllowIntraZone)
+	} else {
+		logger.Info("east-west authorization not configured (set INTENTGATE_EASTWEST_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)
@@ -728,6 +773,7 @@ func main() {
 		"metrics_endpoint", metricsEnabled,
 		"otel_tracing", otelDesc,
 		"action_guard", actionGuardEnabled,
+		"east_west", eastWestEnabled,
 	)
 
 	srv := server.New(server.Config{
@@ -759,6 +805,7 @@ func main() {
 		TenantScope:           tenantScopeEnforcer,
 		FaultIsolation:        faultIsolator,
 		ActionGuard:           actionGuard,
+		EastWest:              eastWest,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
