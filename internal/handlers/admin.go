@@ -25,6 +25,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/segrec"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/zonescope"
@@ -581,6 +582,77 @@ func NewAdminAuditQueryHandler(cfg AdminConfig) http.Handler {
 //
 // Returns 401 on missing/invalid admin token, 503 when the audit store
 // errors, 400 on unparseable from/to timestamps.
+// flowMapEvents runs the shared read pipeline for the flow-map endpoints:
+// admin auth, tenant scoping (per-tenant admins forced, superadmin may pass
+// ?tenant=), and a windowed audit query (from/to RFC3339, limit default/max
+// 1000). On any failure it writes the HTTP error and returns ok=false. The
+// returned limit echoes the effective page size.
+func flowMapEvents(cfg AdminConfig, w http.ResponseWriter, r *http.Request) (events []audit.Event, limit int, ok bool) {
+	auth := resolveAdminAuth(r, cfg)
+	if !auth.ok {
+		adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+		return nil, 0, false
+	}
+	if cfg.AuditStore == nil {
+		adminError(w, http.StatusServiceUnavailable, "audit store not configured")
+		return nil, 0, false
+	}
+
+	q := r.URL.Query()
+	tenant := q.Get("tenant")
+	if auth.tenant != "" {
+		if tenant != "" && tenant != auth.tenant {
+			adminError(w, http.StatusForbidden,
+				"tenant in query does not match admin token's tenant")
+			return nil, 0, false
+		}
+		tenant = auth.tenant
+	}
+
+	filter := auditstore.QueryFilter{
+		Tenant: tenant,
+		Limit:  parseIntParam(r, "limit", 1000, 1, 1000),
+	}
+	if from := q.Get("from"); from != "" {
+		t, err := time.Parse(time.RFC3339, from)
+		if err != nil {
+			adminError(w, http.StatusBadRequest, "invalid 'from' timestamp: "+err.Error())
+			return nil, 0, false
+		}
+		filter.From = t.UTC()
+	}
+	if to := q.Get("to"); to != "" {
+		t, err := time.Parse(time.RFC3339, to)
+		if err != nil {
+			adminError(w, http.StatusBadRequest, "invalid 'to' timestamp: "+err.Error())
+			return nil, 0, false
+		}
+		filter.To = t.UTC()
+	}
+
+	ev, err := cfg.AuditStore.Query(r.Context(), filter)
+	if err != nil {
+		cfg.Logger.Error("flow-map query failed", "err", err)
+		adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+		return nil, 0, false
+	}
+	return ev, filter.Limit, true
+}
+
+// eventsToCalls maps audit events onto the minimal shape the extractor needs.
+func eventsToCalls(events []audit.Event) []flowmap.Call {
+	calls := make([]flowmap.Call, 0, len(events))
+	for _, e := range events {
+		calls = append(calls, flowmap.Call{
+			Agent:    e.AgentID,
+			Tool:     e.Tool,
+			Tenant:   e.Tenant,
+			Decision: string(e.Decision),
+		})
+	}
+	return calls
+}
+
 func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -592,68 +664,12 @@ func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		auth := resolveAdminAuth(r, cfg)
-		if !auth.ok {
-			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
-			return
-		}
-		if cfg.AuditStore == nil {
-			adminError(w, http.StatusServiceUnavailable, "audit store not configured")
+		events, limit, ok := flowMapEvents(cfg, w, r)
+		if !ok {
 			return
 		}
 
-		q := r.URL.Query()
-		tenant := q.Get("tenant")
-		if auth.tenant != "" {
-			if tenant != "" && tenant != auth.tenant {
-				adminError(w, http.StatusForbidden,
-					"tenant in query does not match admin token's tenant")
-				return
-			}
-			tenant = auth.tenant
-		}
-
-		filter := auditstore.QueryFilter{
-			Tenant: tenant,
-			Limit:  parseIntParam(r, "limit", 1000, 1, 1000),
-		}
-		if from := q.Get("from"); from != "" {
-			t, err := time.Parse(time.RFC3339, from)
-			if err != nil {
-				adminError(w, http.StatusBadRequest, "invalid 'from' timestamp: "+err.Error())
-				return
-			}
-			filter.From = t.UTC()
-		}
-		if to := q.Get("to"); to != "" {
-			t, err := time.Parse(time.RFC3339, to)
-			if err != nil {
-				adminError(w, http.StatusBadRequest, "invalid 'to' timestamp: "+err.Error())
-				return
-			}
-			filter.To = t.UTC()
-		}
-
-		events, err := cfg.AuditStore.Query(r.Context(), filter)
-		if err != nil {
-			cfg.Logger.Error("flow-map query failed", "err", err)
-			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
-			return
-		}
-
-		calls := make([]flowmap.Call, 0, len(events))
-		for _, e := range events {
-			// Only tool-call decisions carry an agent-to-resource edge.
-			// Events with no agent or tool (for example admin mints) are
-			// skipped by Extract itself, so we can pass them through.
-			calls = append(calls, flowmap.Call{
-				Agent:    e.AgentID,
-				Tool:     e.Tool,
-				Tenant:   e.Tenant,
-				Decision: string(e.Decision),
-			})
-		}
-		graph := flowmap.Extract(flowmap.Config{AgentToolPrefix: prefix}, calls)
+		graph := flowmap.Extract(flowmap.Config{AgentToolPrefix: prefix}, eventsToCalls(events))
 
 		// Policy overlay: annotate each edge with the current segmentation
 		// verdict, so the map shows intended policy next to observed traffic.
@@ -700,7 +716,7 @@ func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
 				"edges": annotated,
 			},
 			"sampled": len(events),
-			"limit":   filter.Limit,
+			"limit":   limit,
 		})
 	})
 }
@@ -717,6 +733,89 @@ type flowMapEdge struct {
 	PolicyReason string `json:"policy_reason,omitempty"`
 	CallerZone   string `json:"caller_zone,omitempty"`
 	CalleeZone   string `json:"callee_zone,omitempty"`
+}
+
+// NewAdminFlowRecommendHandler returns the GET /v1/admin/flow-map/recommend
+// handler.
+//
+// It runs the flow extractor over a recent window of audit events and proposes
+// a least-privilege segmentation policy from the ALLOWED traffic: the exact
+// east-west edges the zones used, the tools each zone actually called, whether
+// intra-zone is needed, and which agents are still unzoned. The proposal is
+// advisory; a human reviews and promotes it.
+//
+// The response also includes ready-to-paste config blocks matching
+// INTENTGATE_EASTWEST_CONFIG (existing zones + recommended edges) and
+// INTENTGATE_ZONE_SCOPE_CONFIG (recommended per-zone tool scopes), so an
+// operator can copy the proposal straight into the gateway config.
+//
+// Same auth, tenant scoping, and query params as /v1/admin/flow-map.
+func NewAdminFlowRecommendHandler(cfg AdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	prefix := cfg.AgentToolPrefix
+	if prefix == "" {
+		prefix = "agent:"
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		events, _, ok := flowMapEvents(cfg, w, r)
+		if !ok {
+			return
+		}
+
+		graph := flowmap.Extract(flowmap.Config{AgentToolPrefix: prefix}, eventsToCalls(events))
+		zoneOf := func(a string) string {
+			if cfg.EastWest != nil {
+				return cfg.EastWest.ZoneOf(a)
+			}
+			return ""
+		}
+		rec := segrec.Recommend(graph, zoneOf)
+
+		// Ready-to-paste east-west config: existing zones (unchanged) plus the
+		// recommended edges and observed intra-zone setting.
+		ewc := struct {
+			AgentToolPrefix string            `json:"agent_tool_prefix"`
+			AllowIntraZone  bool              `json:"allow_intra_zone"`
+			Zones           map[string]string `json:"zones"`
+			AllowedEdges    [][2]string       `json:"allowed_edges"`
+		}{
+			AgentToolPrefix: prefix,
+			AllowIntraZone:  rec.IntraZoneObserved,
+			Zones:           map[string]string{},
+			AllowedEdges:    rec.AllowedEdges,
+		}
+		if cfg.EastWest != nil {
+			snap := cfg.EastWest.Snapshot()
+			if snap.Zones != nil {
+				ewc.Zones = snap.Zones
+			}
+			if snap.AgentToolPrefix != "" {
+				ewc.AgentToolPrefix = snap.AgentToolPrefix
+			}
+		}
+
+		// Ready-to-paste zone-scope config from the recommended per-zone tools.
+		type zsScope struct {
+			Tools []string `json:"tools"`
+		}
+		zsc := struct {
+			Scopes map[string]zsScope `json:"scopes"`
+		}{Scopes: map[string]zsScope{}}
+		for zone, tools := range rec.ZoneTools {
+			zsc.Scopes[zone] = zsScope{Tools: tools}
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"recommendation":    rec,
+			"eastwest_config":   ewc,
+			"zone_scope_config": zsc,
+			"sampled":           len(events),
+		})
+	})
 }
 
 // NewAdminAuditVerifyHandler returns the GET /v1/admin/audit/verify
