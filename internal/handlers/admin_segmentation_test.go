@@ -183,6 +183,51 @@ func TestAdminSegmentationWrite_Persists(t *testing.T) {
 	}
 }
 
+// The draft endpoint parses plain language into a segmentation config.
+func TestAdminSegmentationDraft(t *testing.T) {
+	cfg := AdminConfig{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AdminToken:      "secret",
+		AgentToolPrefix: "agent:",
+	}
+	h := NewAdminSegmentationDraftHandler(cfg)
+
+	text := "zone finance: agent-ledger\nprocurement may call finance\nfinance may use read_invoice\nallow intra-zone"
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/segmentation/draft",
+		strings.NewReader(`{"text":`+jsonString(text)+`}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Draft    segmentationConfig `json:"draft"`
+		Warnings []string           `json:"warnings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Draft.EastWest.Zones["agent-ledger"] != "finance" {
+		t.Fatalf("zones not drafted: %+v", resp.Draft.EastWest.Zones)
+	}
+	if len(resp.Draft.EastWest.AllowedEdges) != 1 || resp.Draft.EastWest.AllowedEdges[0] != [2]string{"procurement", "finance"} {
+		t.Fatalf("edges not drafted: %+v", resp.Draft.EastWest.AllowedEdges)
+	}
+	if !resp.Draft.EastWest.AllowIntraZone {
+		t.Fatal("intra-zone not drafted")
+	}
+	if got := resp.Draft.ZoneScope.Scopes["finance"].Tools; len(got) != 1 || got[0] != "read_invoice" {
+		t.Fatalf("scope not drafted: %v", got)
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 // A per-tenant admin may not write global segmentation config.
 func TestAdminSegmentationWrite_TenantForbidden(t *testing.T) {
 	dir := t.TempDir()

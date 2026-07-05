@@ -348,6 +348,9 @@ func New(cfg Config) *http.Server {
 		// persists to the config files and applies on the next restart.
 		mux.Handle("GET /v1/admin/segmentation", handlers.NewAdminSegmentationHandler(adminCfg))
 		mux.Handle("PUT /v1/admin/segmentation", handlers.NewAdminSegmentationWriteHandler(adminCfg))
+		// Draft a segmentation config from a plain-language description
+		// (deterministic parser; the console's LLM assistant falls back here).
+		mux.Handle("POST /v1/admin/segmentation/draft", handlers.NewAdminSegmentationDraftHandler(adminCfg))
 		// Audit query is registered only when an AuditStore is wired
 		// in. Older deployments running stdout-only audit get a 404,
 		// which is what the console keys off to fall back to its

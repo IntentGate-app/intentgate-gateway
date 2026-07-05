@@ -18,6 +18,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/authoring"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
@@ -1026,6 +1027,77 @@ func orEmptyEdges(e [][2]string) [][2]string {
 		return [][2]string{}
 	}
 	return e
+}
+
+// NewAdminSegmentationDraftHandler returns the POST /v1/admin/segmentation/draft
+// handler.
+//
+// It parses a plain-language description of a segmentation policy into a draft
+// config in the same shape the zone editor edits, so the console can load it
+// for review. Deterministic and dependency-free (see internal/authoring): this
+// is the reliable fallback behind the console's optional LLM assistant, and the
+// whole assistant on gateways with no model configured. It only drafts; a human
+// approves and the gateway enforces.
+func NewAdminSegmentationDraftHandler(cfg AdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	prefix := cfg.AgentToolPrefix
+	if prefix == "" {
+		prefix = "agent:"
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg)
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+
+		var body struct {
+			Text string `json:"text"`
+		}
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		if err := dec.Decode(&body); err != nil {
+			adminError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+
+		d := authoring.Parse(body.Text)
+
+		var out segmentationConfig
+		out.EastWest.Enabled = cfg.EastWest != nil
+		out.EastWest.AgentToolPrefix = prefix
+		out.EastWest.AllowIntraZone = d.AllowIntraZone
+		out.EastWest.Zones = orEmptyMap(d.Zones)
+		out.EastWest.AllowedEdges = orEmptyEdges(d.AllowedEdges)
+		out.ZoneScope.Enabled = cfg.ZoneScope != nil
+		out.ZoneScope.Scopes = map[string]struct {
+			Tools   []string `json:"tools"`
+			Tenants []string `json:"tenants,omitempty"`
+		}{}
+		for zone, tools := range d.ZoneTools {
+			out.ZoneScope.Scopes[zone] = struct {
+				Tools   []string `json:"tools"`
+				Tenants []string `json:"tenants,omitempty"`
+			}{Tools: tools, Tenants: d.ZoneTenants[zone]}
+		}
+		// Zones that carry only a tenant restriction still need a scope entry.
+		for zone, tenants := range d.ZoneTenants {
+			if _, ok := out.ZoneScope.Scopes[zone]; !ok {
+				out.ZoneScope.Scopes[zone] = struct {
+					Tools   []string `json:"tools"`
+					Tenants []string `json:"tenants,omitempty"`
+				}{Tools: []string{}, Tenants: tenants}
+			}
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"draft":    out,
+			"warnings": d.Warnings,
+		})
+	})
 }
 
 // NewAdminAuditVerifyHandler returns the GET /v1/admin/audit/verify
