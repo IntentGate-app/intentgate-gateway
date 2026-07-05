@@ -182,6 +182,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 	"github.com/IntentGate-app/intentgate-gateway/internal/webhook"
+	"github.com/IntentGate-app/intentgate-gateway/internal/zonescope"
 	"github.com/redis/go-redis/v9"
 
 	"go.opentelemetry.io/otel"
@@ -260,6 +261,12 @@ func main() {
 	eastWestEnabled := envOr("INTENTGATE_EASTWEST_ENABLED", "") == "true"
 	eastWestPrefix := envOr("INTENTGATE_EASTWEST_AGENT_PREFIX", "agent:")
 	eastWestConfigPath := envOr("INTENTGATE_EASTWEST_CONFIG", "")
+	// Per-zone north-south scope. Off by default. When enabled, an ordinary
+	// tool call is checked against the caller zone's allowlist (which tools,
+	// which tenants). Scopes are loaded from a JSON file at
+	// INTENTGATE_ZONE_SCOPE_CONFIG. See internal/zonescope.
+	zoneScopeEnabled := envOr("INTENTGATE_ZONE_SCOPE_ENABLED", "") == "true"
+	zoneScopeConfigPath := envOr("INTENTGATE_ZONE_SCOPE_CONFIG", "")
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -501,6 +508,36 @@ func main() {
 			"allow_intra_zone", ewCfg.AllowIntraZone)
 	} else {
 		logger.Info("east-west authorization not configured (set INTENTGATE_EASTWEST_ENABLED=true to enable)")
+	}
+
+	var zoneScope *zonescope.Guard
+	if zoneScopeEnabled {
+		zsCfg := zonescope.Config{}
+		if zoneScopeConfigPath != "" {
+			raw, err := os.ReadFile(zoneScopeConfigPath)
+			if err != nil {
+				logger.Error("cannot read INTENTGATE_ZONE_SCOPE_CONFIG", "path", zoneScopeConfigPath, "err", err)
+				os.Exit(1)
+			}
+			var fileCfg struct {
+				Scopes map[string]struct {
+					Tools   []string `json:"tools"`
+					Tenants []string `json:"tenants"`
+				} `json:"scopes"`
+			}
+			if err := json.Unmarshal(raw, &fileCfg); err != nil {
+				logger.Error("invalid INTENTGATE_ZONE_SCOPE_CONFIG JSON", "err", err)
+				os.Exit(1)
+			}
+			zsCfg.Scopes = make(map[string]zonescope.Scope, len(fileCfg.Scopes))
+			for zone, s := range fileCfg.Scopes {
+				zsCfg.Scopes[zone] = zonescope.Scope{Tools: s.Tools, Tenants: s.Tenants}
+			}
+		}
+		zoneScope = zonescope.New(zsCfg)
+		logger.Info("zone scope enabled", "scoped_zones", len(zsCfg.Scopes))
+	} else {
+		logger.Info("zone scope not configured (set INTENTGATE_ZONE_SCOPE_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)
@@ -774,6 +811,7 @@ func main() {
 		"otel_tracing", otelDesc,
 		"action_guard", actionGuardEnabled,
 		"east_west", eastWestEnabled,
+		"zone_scope", zoneScopeEnabled,
 	)
 
 	srv := server.New(server.Config{
@@ -806,6 +844,7 @@ func main() {
 		FaultIsolation:        faultIsolator,
 		ActionGuard:           actionGuard,
 		EastWest:              eastWest,
+		ZoneScope:             zoneScope,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
