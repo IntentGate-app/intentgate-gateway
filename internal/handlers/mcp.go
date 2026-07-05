@@ -1514,6 +1514,9 @@ func (h *mcpHandler) runPolicyCheck(
 			// against acme's promoted engine, falling back to the
 			// default-fallback engine when acme has no slot.
 			in.Capability.Tenant = cap.token.Tenant
+			// Zone lets policy gate north-south access by the caller's
+			// signed segmentation zone, alongside the zone-scope guard.
+			in.Capability.Zone = cap.token.Zone
 			// StepUpAt is sourced from the signed step_up caveat on
 			// the token's chain (set by /v1/admin/mint when the
 			// operator confirmed an out-of-band factor). A token
@@ -1534,6 +1537,24 @@ func (h *mcpHandler) runPolicyCheck(
 			AllowedTools:   intent.intent.AllowedTools,
 			ForbiddenTools: intent.intent.ForbiddenTools,
 			Confidence:     intent.intent.Confidence,
+		}
+	}
+	// East-west shape: when this call is an agent-to-agent call, surface the
+	// caller, callee, and their zones so policy can condition the specific
+	// edge. Uses the same guard resolution as the default-deny zone gate, so
+	// the zones match. Nil for ordinary agent-to-tool calls.
+	if h.cfg.EastWest != nil {
+		var czone string
+		if cap.token != nil {
+			czone = cap.token.Zone
+		}
+		if ewRes := h.cfg.EastWest.Check(cap.agentID, czone, params.Name); ewRes.EastWest {
+			in.EastWest = &policy.InputEastWest{
+				CallerAgent: ewRes.CallerAgent,
+				CallerZone:  ewRes.CallerZone,
+				CalleeAgent: ewRes.CalleeAgent,
+				CalleeZone:  ewRes.CalleeZone,
+			}
 		}
 	}
 

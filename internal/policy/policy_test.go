@@ -152,6 +152,81 @@ decision := {"allow": true, "reason": "custom policy says yes"} if {
 	}
 }
 
+// A policy can condition a specific east-west edge on the caller and callee
+// zones surfaced in input.east_west.
+func TestPolicyReadsEastWestEdge(t *testing.T) {
+	// Deny any call into the finance zone unless the caller is procurement.
+	custom := `
+package intentgate.policy
+import rego.v1
+default decision := {"allow": true, "reason": "ok"}
+decision := {"allow": false, "reason": "cross-zone call into finance denied"} if {
+	input.east_west.callee_zone == "finance"
+	input.east_west.caller_zone != "procurement"
+}
+`
+	e, err := NewEngine(context.Background(), custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// support -> finance: denied.
+	d, err := e.Evaluate(context.Background(), Input{
+		Tool: "agent:agent-finance",
+		EastWest: &InputEastWest{
+			CallerAgent: "agent-support", CallerZone: "support",
+			CalleeAgent: "agent-finance", CalleeZone: "finance",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Allow {
+		t.Fatalf("support->finance should be denied by policy, got %+v", d)
+	}
+
+	// procurement -> finance: allowed.
+	d, err = e.Evaluate(context.Background(), Input{
+		Tool: "agent:agent-finance",
+		EastWest: &InputEastWest{
+			CallerAgent: "agent-procure", CallerZone: "procurement",
+			CalleeAgent: "agent-finance", CalleeZone: "finance",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Allow {
+		t.Fatalf("procurement->finance should be allowed by policy, got %+v", d)
+	}
+}
+
+// A policy can gate north-south tool access on the caller's signed zone.
+func TestPolicyReadsCapabilityZone(t *testing.T) {
+	custom := `
+package intentgate.policy
+import rego.v1
+default decision := {"allow": false, "reason": "default"}
+decision := {"allow": true, "reason": "zone ok"} if {
+	input.capability.zone == "finance"
+}
+`
+	e, err := NewEngine(context.Background(), custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := e.Evaluate(context.Background(), Input{
+		Tool:       "read_invoice",
+		Capability: &InputCap{Subject: "agent-x", Zone: "finance"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Allow {
+		t.Fatalf("finance-zone caller should be allowed, got %+v", d)
+	}
+}
+
 // --- Compilation errors --------------------------------------------------
 
 func TestNewEngineRejectsInvalidRego(t *testing.T) {
