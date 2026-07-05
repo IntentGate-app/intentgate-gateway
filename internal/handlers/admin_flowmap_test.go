@@ -158,3 +158,58 @@ func TestAdminFlowMap_PolicyOverlay(t *testing.T) {
 		t.Fatal("east-west edge not present in response")
 	}
 }
+
+// The recommend endpoint proposes a least-privilege policy from allowed traffic.
+func TestAdminFlowRecommend(t *testing.T) {
+	ew := eastwest.New(eastwest.Config{
+		AgentToolPrefix: "agent:",
+		Zones: map[string]string{
+			"agent-support": "support",
+			"agent-finance": "finance",
+		},
+	})
+	cfg := AdminConfig{
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AdminToken:      "secret",
+		AuditStore:      flowMapStore(t),
+		AgentToolPrefix: "agent:",
+		EastWest:        ew,
+	}
+	h := NewAdminFlowRecommendHandler(cfg)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/flow-map/recommend", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Recommendation struct {
+			AllowedEdges [][2]string         `json:"allowed_edges"`
+			ZoneTools    map[string][]string `json:"zone_tools"`
+		} `json:"recommendation"`
+		ZoneScopeConfig struct {
+			Scopes map[string]struct {
+				Tools []string `json:"tools"`
+			} `json:"scopes"`
+		} `json:"zone_scope_config"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// finance called read_invoice (allowed x2) -> proposed scope.
+	if got := resp.Recommendation.ZoneTools["finance"]; len(got) != 1 || got[0] != "read_invoice" {
+		t.Fatalf("finance zone tools = %v, want [read_invoice]", got)
+	}
+	if got := resp.ZoneScopeConfig.Scopes["finance"].Tools; len(got) != 1 || got[0] != "read_invoice" {
+		t.Fatalf("zone_scope_config finance tools = %v, want [read_invoice]", got)
+	}
+	// The only east-west call (support -> finance) was blocked, so it must not
+	// become a recommended edge.
+	if len(resp.Recommendation.AllowedEdges) != 0 {
+		t.Fatalf("allowed edges = %v, want none (east-west was blocked)", resp.Recommendation.AllowedEdges)
+	}
+}

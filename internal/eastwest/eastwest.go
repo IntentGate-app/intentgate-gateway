@@ -117,6 +117,28 @@ func (g *Guard) ZoneOf(agent string) string {
 	return g.zone(agent)
 }
 
+// Snapshot returns a deep copy of the guard's configuration, for read-only
+// surfaces that render the current segmentation (the recommender builds a
+// proposed config on top of the existing zones). Mutating the result does not
+// affect the guard.
+func (g *Guard) Snapshot() Config {
+	out := Config{
+		AgentToolPrefix: g.cfg.AgentToolPrefix,
+		AllowIntraZone:  g.cfg.AllowIntraZone,
+	}
+	if g.cfg.Zones != nil {
+		out.Zones = make(map[string]string, len(g.cfg.Zones))
+		for k, v := range g.cfg.Zones {
+			out.Zones[k] = v
+		}
+	}
+	if g.cfg.AllowedEdges != nil {
+		out.AllowedEdges = make([][2]string, len(g.cfg.AllowedEdges))
+		copy(out.AllowedEdges, g.cfg.AllowedEdges)
+	}
+	return out
+}
+
 // Check decides whether callerAgent may call the given tool. If the tool is
 // not an agent-to-agent call, the result is Allow with EastWest=false, so the
 // caller can treat it as a pass-through.

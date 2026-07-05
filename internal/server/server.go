@@ -344,6 +344,8 @@ func New(cfg Config) *http.Server {
 			// Agent estate topology, extracted from the audit stream: the
 			// data source for the console flow map. Read-only.
 			mux.Handle("GET /v1/admin/flow-map", handlers.NewAdminFlowMapHandler(adminCfg))
+			// Least-privilege segmentation proposal from observed flows.
+			mux.Handle("GET /v1/admin/flow-map/recommend", handlers.NewAdminFlowRecommendHandler(adminCfg))
 			// Tamper-evident chain verification (Pro v2 #4, session
 			// 54). Available whenever audit persistence is on; older
 			// deployments where the chain columns are NULL surface
