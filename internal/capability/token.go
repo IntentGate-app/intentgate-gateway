@@ -144,6 +144,20 @@ const (
 	// The signed presence of the caveat in the chain ensures a holder
 	// cannot forge a fake step-up annotation.
 	CaveatStepUp = "step_up"
+	// CaveatCalleeAllow — agent-to-agent (east-west) allowlist carried on
+	// the token. Lists the callee agents (Callees) and/or callee zones
+	// (CalleeZones) this token may call. East-west authorization has two
+	// independent gates: the gateway's zone policy (internal/eastwest) and
+	// this per-token allowlist, and both must permit the call. A token with
+	// no callee_allow caveat is unrestricted here (the zone policy alone
+	// governs). When present, the callee must satisfy EVERY callee_allow
+	// caveat on the chain, so attenuation can only narrow which agents a
+	// delegated child may call, never widen them. The capability layer
+	// accepts this caveat as informational (the callee is not known at
+	// Check time); enforcement happens in the east-west stage via
+	// [Token.CanCall]. The signed presence of the caveat ensures a holder
+	// cannot strip or widen its own east-west allowance.
+	CaveatCalleeAllow = "callee_allow"
 )
 
 // Caveat is a structured restriction recorded in a token's chain.
@@ -166,6 +180,14 @@ type Caveat struct {
 	// operations on recent fresh-factor presence. Signed in the
 	// chain so a holder cannot fabricate one.
 	StepUpAt int64 `json:"step_up_at,omitempty"`
+	// Callees is the list of callee agent ids this token may call in an
+	// agent-to-agent (east-west) call. Only meaningful when Type is
+	// [CaveatCalleeAllow]. A callee is permitted if its agent id is in
+	// Callees OR its zone is in CalleeZones.
+	Callees []string `json:"callees,omitempty"`
+	// CalleeZones is the list of callee zones this token may call in an
+	// agent-to-agent call. Only meaningful when Type is [CaveatCalleeAllow].
+	CalleeZones []string `json:"callee_zones,omitempty"`
 }
 
 // canonicalPayload returns the bytes that seed the HMAC chain. It
