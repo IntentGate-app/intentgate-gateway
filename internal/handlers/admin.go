@@ -19,6 +19,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/flowmap"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
@@ -81,6 +82,11 @@ type AdminConfig struct {
 	// Tasks is the task-binding store read by the /v1/admin/tasks
 	// endpoints (list + clear). nil disables those routes.
 	Tasks task.Store
+	// AgentToolPrefix is the tool-name prefix that marks an agent-to-agent
+	// call (for example "agent:"), used by the /v1/admin/flow-map endpoint
+	// to classify east-west edges. Should match the east-west guard's
+	// prefix so the map and enforcement agree. Empty defaults to "agent:".
+	AgentToolPrefix string
 }
 
 // NewAdminRevokeHandler returns the POST /v1/admin/revoke handler.
@@ -539,6 +545,113 @@ func NewAdminAuditQueryHandler(cfg AdminConfig) http.Handler {
 			}
 		}
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+}
+
+// NewAdminFlowMapHandler returns the GET /v1/admin/flow-map handler.
+//
+// It reads a recent window of audit events and extracts the agent estate
+// topology: agent and tool nodes, plus directed edges with per-edge
+// allow/block/escalate counts. Agent-to-agent (east-west) edges are derived by
+// parsing the agent-tool prefix out of the tool name. This is the data source
+// the console topology map draws.
+//
+// Query params (all optional):
+//
+//	from    ISO-8601 timestamp, inclusive lower bound on event ts
+//	to      ISO-8601 timestamp, inclusive upper bound
+//	tenant  scope to one tenant (superadmin only; per-tenant admins forced)
+//	limit   sample size, default 1000, max 1000
+//
+// Body:
+//
+//	{
+//	  "graph":   { "nodes": [...], "edges": [...] },
+//	  "sampled": 512,     // number of audit events summarized
+//	  "limit":   1000
+//	}
+//
+// Returns 401 on missing/invalid admin token, 503 when the audit store
+// errors, 400 on unparseable from/to timestamps.
+func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	prefix := cfg.AgentToolPrefix
+	if prefix == "" {
+		prefix = "agent:"
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg)
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+		if cfg.AuditStore == nil {
+			adminError(w, http.StatusServiceUnavailable, "audit store not configured")
+			return
+		}
+
+		q := r.URL.Query()
+		tenant := q.Get("tenant")
+		if auth.tenant != "" {
+			if tenant != "" && tenant != auth.tenant {
+				adminError(w, http.StatusForbidden,
+					"tenant in query does not match admin token's tenant")
+				return
+			}
+			tenant = auth.tenant
+		}
+
+		filter := auditstore.QueryFilter{
+			Tenant: tenant,
+			Limit:  parseIntParam(r, "limit", 1000, 1, 1000),
+		}
+		if from := q.Get("from"); from != "" {
+			t, err := time.Parse(time.RFC3339, from)
+			if err != nil {
+				adminError(w, http.StatusBadRequest, "invalid 'from' timestamp: "+err.Error())
+				return
+			}
+			filter.From = t.UTC()
+		}
+		if to := q.Get("to"); to != "" {
+			t, err := time.Parse(time.RFC3339, to)
+			if err != nil {
+				adminError(w, http.StatusBadRequest, "invalid 'to' timestamp: "+err.Error())
+				return
+			}
+			filter.To = t.UTC()
+		}
+
+		events, err := cfg.AuditStore.Query(r.Context(), filter)
+		if err != nil {
+			cfg.Logger.Error("flow-map query failed", "err", err)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+
+		calls := make([]flowmap.Call, 0, len(events))
+		for _, e := range events {
+			// Only tool-call decisions carry an agent-to-resource edge.
+			// Events with no agent or tool (for example admin mints) are
+			// skipped by Extract itself, so we can pass them through.
+			calls = append(calls, flowmap.Call{
+				Agent:    e.AgentID,
+				Tool:     e.Tool,
+				Tenant:   e.Tenant,
+				Decision: string(e.Decision),
+			})
+		}
+		graph := flowmap.Extract(flowmap.Config{AgentToolPrefix: prefix}, calls)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"graph":   graph,
+			"sampled": len(events),
+			"limit":   filter.Limit,
+		})
 	})
 }
 

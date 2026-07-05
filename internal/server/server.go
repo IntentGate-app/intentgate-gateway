@@ -186,6 +186,11 @@ type Config struct {
 	// check. Constructed at startup from INTENTGATE_ZONE_SCOPE_*. See
 	// internal/zonescope.
 	ZoneScope *zonescope.Guard
+	// AgentToolPrefix is the tool-name prefix marking an agent-to-agent call
+	// (for example "agent:"). Used by the /v1/admin/flow-map endpoint to
+	// classify east-west edges so the map matches enforcement. Empty defaults
+	// to "agent:" in the handler.
+	AgentToolPrefix string
 	// PolicyStore is the optional draft + active-pointer store
 	// backing the /v1/admin/policies/* endpoints. nil leaves those
 	// routes unregistered (older deployments and minimal dev
@@ -288,15 +293,16 @@ func New(cfg Config) *http.Server {
 	// fail 401 anyway and exposing the routes adds no value.
 	if cfg.AdminToken != "" || len(cfg.TenantAdmins) > 0 {
 		adminCfg := handlers.AdminConfig{
-			Logger:       logger,
-			AdminToken:   cfg.AdminToken,
-			TenantAdmins: cfg.TenantAdmins,
-			MasterKey:    cfg.MasterKey,
-			Revocation:   cfg.Revocation,
-			Audit:        cfg.Audit,
-			Credentials:  cfg.Credentials,
-			KillSwitch:   cfg.KillSwitch,
-			Tasks:        cfg.Tasks,
+			Logger:          logger,
+			AdminToken:      cfg.AdminToken,
+			TenantAdmins:    cfg.TenantAdmins,
+			MasterKey:       cfg.MasterKey,
+			Revocation:      cfg.Revocation,
+			Audit:           cfg.Audit,
+			Credentials:     cfg.Credentials,
+			KillSwitch:      cfg.KillSwitch,
+			Tasks:           cfg.Tasks,
+			AgentToolPrefix: cfg.AgentToolPrefix,
 		}
 		mux.Handle("POST /v1/admin/revoke", handlers.NewAdminRevokeHandler(adminCfg))
 		// Task-level intent binding (goal-drift): read-only list + clear.
@@ -333,6 +339,9 @@ func New(cfg Config) *http.Server {
 		if cfg.AuditStore != nil {
 			adminCfg.AuditStore = cfg.AuditStore
 			mux.Handle("GET /v1/admin/audit", handlers.NewAdminAuditQueryHandler(adminCfg))
+			// Agent estate topology, extracted from the audit stream: the
+			// data source for the console flow map. Read-only.
+			mux.Handle("GET /v1/admin/flow-map", handlers.NewAdminFlowMapHandler(adminCfg))
 			// Tamper-evident chain verification (Pro v2 #4, session
 			// 54). Available whenever audit persistence is on; older
 			// deployments where the chain columns are NULL surface
