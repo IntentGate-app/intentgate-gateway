@@ -845,6 +845,7 @@ func main() {
 		ActionGuard:           actionGuard,
 		EastWest:              eastWest,
 		ZoneScope:             zoneScope,
+		AgentToolPrefix:       eastWestPrefix,
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
