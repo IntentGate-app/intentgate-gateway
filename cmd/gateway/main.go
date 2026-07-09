@@ -312,6 +312,10 @@ func main() {
 	s3Region := envOr("INTENTGATE_SIEM_S3_REGION", "")
 	s3KMSKeyID := envOr("INTENTGATE_SIEM_S3_KMS_KEY_ID", "")
 	s3GatewayID := envOr("INTENTGATE_SIEM_S3_GATEWAY_ID", "")
+	// Endpoint override + path-style for S3-compatible stores (MinIO,
+	// on-prem object stores). Leave empty for real AWS S3.
+	s3Endpoint := envOr("INTENTGATE_SIEM_S3_ENDPOINT", "")
+	s3ForcePathStyle := envOr("INTENTGATE_SIEM_S3_FORCE_PATH_STYLE", "") == "true"
 	// Webhook fan-out (Pro v2 #3). URL is the operator-configured
 	// receiver — typically a console-pro endpoint that re-routes
 	// per-tenant to Slack / Teams / PagerDuty. Empty disables the
@@ -607,6 +611,8 @@ func main() {
 		s3Region:             s3Region,
 		s3KMSKeyID:           s3KMSKeyID,
 		s3GatewayID:          s3GatewayID,
+		s3Endpoint:           s3Endpoint,
+		s3ForcePathStyle:     s3ForcePathStyle,
 		splunkEvents:         splunkEvents,
 		datadogEvents:        datadogEvents,
 		sentinelEvents:       sentinelEvents,
@@ -1225,6 +1231,8 @@ type siemEnv struct {
 	s3Region             string
 	s3KMSKeyID           string
 	s3GatewayID          string
+	s3Endpoint           string
+	s3ForcePathStyle     bool
 	// Per-sink event routing modes ("all" / "findings" / ""). Empty
 	// uses the smart default computed in loadSIEM.
 	splunkEvents   string
@@ -1272,8 +1280,13 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			return nil, nil, "", err
 		}
 		splunkMode := siem.ParseEventMode(env.splunkEvents, defaultMode)
-		emitters = append(emitters, siem.NewRoutingEmitter(em, splunkMode))
-		reporters = append(reporters, em)
+		routed := siem.NewRoutingEmitter(em, splunkMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
 		labels = append(labels, "splunk")
 		logger.Info("SIEM emitter: splunk", "url", env.splunkURL, "index", env.splunkIndex, "events", string(splunkMode))
 	}
@@ -1289,8 +1302,13 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			return nil, nil, "", err
 		}
 		datadogMode := siem.ParseEventMode(env.datadogEvents, defaultMode)
-		emitters = append(emitters, siem.NewRoutingEmitter(em, datadogMode))
-		reporters = append(reporters, em)
+		routed := siem.NewRoutingEmitter(em, datadogMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
 		labels = append(labels, "datadog")
 		logger.Info("SIEM emitter: datadog", "site", env.datadogSite, "events", string(datadogMode))
 	}
@@ -1312,8 +1330,13 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			return nil, nil, "", fmt.Errorf("sentinel: %w", err)
 		}
 		sentinelMode := siem.ParseEventMode(env.sentinelEvents, defaultMode)
-		emitters = append(emitters, siem.NewRoutingEmitter(em, sentinelMode))
-		reporters = append(reporters, em)
+		routed := siem.NewRoutingEmitter(em, sentinelMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
 		labels = append(labels, "sentinel")
 		logger.Info("SIEM emitter: sentinel",
 			"dce", env.sentinelDCEURL,
@@ -1324,12 +1347,14 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 
 	if env.s3Bucket != "" {
 		em, err := siem.NewS3Emitter(siem.S3Config{
-			Bucket:    env.s3Bucket,
-			Prefix:    env.s3Prefix,
-			Region:    env.s3Region,
-			KMSKeyID:  env.s3KMSKeyID,
-			GatewayID: env.s3GatewayID,
-			Logger:    logger,
+			Bucket:         env.s3Bucket,
+			Prefix:         env.s3Prefix,
+			Region:         env.s3Region,
+			KMSKeyID:       env.s3KMSKeyID,
+			GatewayID:      env.s3GatewayID,
+			Endpoint:       env.s3Endpoint,
+			ForcePathStyle: env.s3ForcePathStyle,
+			Logger:         logger,
 		})
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("s3: %w", err)

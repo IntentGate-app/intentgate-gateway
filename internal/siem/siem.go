@@ -70,6 +70,12 @@ type Status struct {
 	// LastError is the most recent error message from the worker, or
 	// the empty string when the destination is healthy.
 	LastError string `json:"last_error,omitempty"`
+	// Mode is the event routing mode for this sink: "all" (the full
+	// raw stream) or "findings" (only blocks, escalations, and step-up
+	// allows, each stamped with a PagerDuty-style summary). Empty for
+	// sinks that always carry the full stream, such as S3. Set per sink
+	// from INTENTGATE_SIEM_<SINK>_EVENTS.
+	Mode string `json:"mode,omitempty"`
 }
 
 // StatusReporter is the (small) interface the admin endpoint uses to

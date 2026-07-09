@@ -77,6 +77,15 @@ type S3Config struct {
 	// from multiple gateway replicas landing into the same bucket.
 	// When empty, "gateway" is used.
 	GatewayID string
+	// Endpoint overrides the S3 service endpoint. Leave empty for real
+	// AWS S3. Set it to point at an S3-compatible store such as MinIO
+	// (for example http://minio:9000), for a lab or on-prem object store.
+	Endpoint string
+	// ForcePathStyle uses path-style addressing (host/bucket) instead of
+	// virtual-host style (bucket.host). Required by most S3-compatible
+	// stores such as MinIO, which have no per-bucket DNS. Ignored for
+	// real AWS S3.
+	ForcePathStyle bool
 	// Client is the S3 client used for PutObject. nil falls back to
 	// the SDK default. Tests inject a stub.
 	Client PutObjectAPI
@@ -127,7 +136,7 @@ func NewS3Emitter(cfg S3Config) (*S3Emitter, error) {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.Client == nil {
-		client, err := defaultS3Client(cfg.Region)
+		client, err := defaultS3Client(cfg.Region, cfg.Endpoint, cfg.ForcePathStyle)
 		if err != nil {
 			return nil, fmt.Errorf("siem/s3: load default config: %w", err)
 		}
@@ -259,7 +268,7 @@ func encodeNDJSONGzip(events []audit.Event) ([]byte, error) {
 // defaultS3Client builds an S3 client from the default AWS credential
 // chain. Called only when the operator hasn't injected a custom
 // PutObjectAPI — typically only true under tests.
-func defaultS3Client(region string) (*s3.Client, error) {
+func defaultS3Client(region, endpoint string, forcePathStyle bool) (*s3.Client, error) {
 	opts := []func(*awsconfig.LoadOptions) error{}
 	if region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
@@ -268,7 +277,17 @@ func defaultS3Client(region string) (*s3.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s3.NewFromConfig(cfg), nil
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		// Endpoint override + path-style addressing let the same sink
+		// target an S3-compatible store such as MinIO. Empty endpoint
+		// leaves the SDK pointed at real AWS S3.
+		if endpoint != "" {
+			o.BaseEndpoint = &endpoint
+		}
+		if forcePathStyle {
+			o.UsePathStyle = true
+		}
+	}), nil
 }
 
 // isTransientS3Error sniffs the error for a 5xx-ish or throttling

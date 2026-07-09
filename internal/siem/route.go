@@ -98,21 +98,21 @@ func BuildSummary(e audit.Event) string {
 // this sink's copy. A raw sink (S3) that is not wrapped still receives
 // the untouched event, which keeps the cold tier a faithful raw record.
 type routingEmitter struct {
-	inner        audit.Emitter
-	findingsOnly bool
+	inner audit.Emitter
+	mode  EventMode
 }
 
 // NewRoutingEmitter wraps inner. When mode is ModeFindings it forwards
 // only findings; in every mode it enriches forwarded events with a
 // PagerDuty-style Summary.
 func NewRoutingEmitter(inner audit.Emitter, mode EventMode) audit.Emitter {
-	return &routingEmitter{inner: inner, findingsOnly: mode == ModeFindings}
+	return &routingEmitter{inner: inner, mode: mode}
 }
 
 // Emit applies the findings filter, then stamps the summary, then
 // forwards to the wrapped sink.
 func (r *routingEmitter) Emit(ctx context.Context, e audit.Event) {
-	if r.findingsOnly && !IsFinding(e) {
+	if r.mode == ModeFindings && !IsFinding(e) {
 		return
 	}
 	if e.Summary == "" {
@@ -128,4 +128,18 @@ func (r *routingEmitter) Stop(ctx context.Context) error {
 		return s.Stop(ctx)
 	}
 	return nil
+}
+
+// Status forwards the wrapped sink's status snapshot and annotates it
+// with the routing mode, so the admin endpoint and the console can show
+// whether this sink carries findings only or the full stream.
+func (r *routingEmitter) Status() Status {
+	var st Status
+	if sr, ok := r.inner.(StatusReporter); ok {
+		st = sr.Status()
+	}
+	if r.mode != "" {
+		st.Mode = string(r.mode)
+	}
+	return st
 }
