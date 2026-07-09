@@ -134,6 +134,17 @@ type Event struct {
 	Check    Check    `json:"check,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
 
+	// Summary is a one-line, human-readable description of the event,
+	// PagerDuty-style ("BLOCK place_purchase_order by agent-procure
+	// (policy: amount over 5000 EUR)"). It is stamped by the SIEM
+	// routing layer (internal/siem) on events forwarded to an alerting
+	// sink, so a Sentinel analytics rule or a PagerDuty-style channel
+	// has a readable title without parsing the fields. It is left empty
+	// on the raw audit record and the cold-storage (S3) stream, and it
+	// is NOT part of the canonical, hash-chained event, so it never
+	// affects tamper-evidence.
+	Summary string `json:"summary,omitempty"`
+
 	// Tenant is the trust-domain namespace this event was authorized
 	// under. Read from the verified capability token; never from the
 	// untrusted request. SOC analysts in multi-tenant deployments

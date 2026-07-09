@@ -290,6 +290,17 @@ func main() {
 	sentinelTenantID := envOr("INTENTGATE_SIEM_SENTINEL_TENANT_ID", "")
 	sentinelClientID := envOr("INTENTGATE_SIEM_SENTINEL_CLIENT_ID", "")
 	sentinelClientSecret := envOr("INTENTGATE_SIEM_SENTINEL_CLIENT_SECRET", "")
+	// Per-sink event routing. "findings" sends only findings (blocks,
+	// escalations, step-up-flagged allows), each stamped with a
+	// PagerDuty-style one-line summary; "all" sends the full raw
+	// stream. Empty means "use the smart default": findings for the
+	// alerting sinks when an S3 cold tier is configured, all otherwise.
+	// This is the toggle that lets an operator keep the expensive hot
+	// tier (Sentinel) to findings while raw logs age in S3, or send
+	// everything to Sentinel when that is what they want.
+	splunkEvents := envOr("INTENTGATE_SIEM_SPLUNK_EVENTS", "")
+	datadogEvents := envOr("INTENTGATE_SIEM_DATADOG_EVENTS", "")
+	sentinelEvents := envOr("INTENTGATE_SIEM_SENTINEL_EVENTS", "")
 	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
 	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
 	// so Athena / Glue / Spark can prune partitions at query time
@@ -596,6 +607,9 @@ func main() {
 		s3Region:             s3Region,
 		s3KMSKeyID:           s3KMSKeyID,
 		s3GatewayID:          s3GatewayID,
+		splunkEvents:         splunkEvents,
+		datadogEvents:        datadogEvents,
+		sentinelEvents:       sentinelEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1211,6 +1225,11 @@ type siemEnv struct {
 	s3Region             string
 	s3KMSKeyID           string
 	s3GatewayID          string
+	// Per-sink event routing modes ("all" / "findings" / ""). Empty
+	// uses the smart default computed in loadSIEM.
+	splunkEvents   string
+	datadogEvents  string
+	sentinelEvents string
 }
 
 // loadSIEM constructs whichever SIEM emitters the operator has wired
@@ -1228,6 +1247,17 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 	var reporters []siem.StatusReporter
 	var labels []string
 
+	// Smart default for the alerting sinks (Splunk, Datadog, Sentinel):
+	// when an S3 cold tier is configured, default them to findings so
+	// the expensive hot tier only holds findings while raw logs age in
+	// S3; otherwise default to all so nothing is lost. Each sink's own
+	// INTENTGATE_SIEM_<SINK>_EVENTS overrides this default. The S3 sink
+	// is always the raw stream and is never wrapped.
+	defaultMode := siem.ModeAll
+	if env.s3Bucket != "" {
+		defaultMode = siem.ModeFindings
+	}
+
 	if env.splunkURL != "" || env.splunkToken != "" {
 		if env.splunkURL == "" || env.splunkToken == "" {
 			return nil, nil, "", fmt.Errorf("INTENTGATE_SIEM_SPLUNK_URL and INTENTGATE_SIEM_SPLUNK_TOKEN must both be set")
@@ -1241,10 +1271,11 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 		if err != nil {
 			return nil, nil, "", err
 		}
-		emitters = append(emitters, em)
+		splunkMode := siem.ParseEventMode(env.splunkEvents, defaultMode)
+		emitters = append(emitters, siem.NewRoutingEmitter(em, splunkMode))
 		reporters = append(reporters, em)
 		labels = append(labels, "splunk")
-		logger.Info("SIEM emitter: splunk", "url", env.splunkURL, "index", env.splunkIndex)
+		logger.Info("SIEM emitter: splunk", "url", env.splunkURL, "index", env.splunkIndex, "events", string(splunkMode))
 	}
 
 	if env.datadogAPIKey != "" {
@@ -1257,10 +1288,11 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 		if err != nil {
 			return nil, nil, "", err
 		}
-		emitters = append(emitters, em)
+		datadogMode := siem.ParseEventMode(env.datadogEvents, defaultMode)
+		emitters = append(emitters, siem.NewRoutingEmitter(em, datadogMode))
 		reporters = append(reporters, em)
 		labels = append(labels, "datadog")
-		logger.Info("SIEM emitter: datadog", "site", env.datadogSite)
+		logger.Info("SIEM emitter: datadog", "site", env.datadogSite, "events", string(datadogMode))
 	}
 
 	if anySentinelSet := env.sentinelDCEURL != "" ||
@@ -1279,13 +1311,15 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("sentinel: %w", err)
 		}
-		emitters = append(emitters, em)
+		sentinelMode := siem.ParseEventMode(env.sentinelEvents, defaultMode)
+		emitters = append(emitters, siem.NewRoutingEmitter(em, sentinelMode))
 		reporters = append(reporters, em)
 		labels = append(labels, "sentinel")
 		logger.Info("SIEM emitter: sentinel",
 			"dce", env.sentinelDCEURL,
 			"dcr", env.sentinelDCRID,
-			"stream", env.sentinelStream)
+			"stream", env.sentinelStream,
+			"events", string(sentinelMode))
 	}
 
 	if env.s3Bucket != "" {
