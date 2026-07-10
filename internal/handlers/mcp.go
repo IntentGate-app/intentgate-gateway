@@ -26,6 +26,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
+	"github.com/IntentGate-app/intentgate-gateway/internal/refverify"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
@@ -114,6 +115,13 @@ type MCPHandlerConfig struct {
 	// the Rego policy stage. nil disables the stage entirely, leaving the
 	// four-check pipeline unchanged. See internal/actionguard.
 	ActionGuard *actionguard.Guard
+	// RefVerify is the reference-verification control: it verifies a
+	// payment's payee against the system-of-record vendor master and
+	// quarantines (holds for approval) on mismatch, unknown payee, or an
+	// unavailable reference source (fail-closed). Runs right after the
+	// action guard and before the segmentation/policy stages. nil disables
+	// the stage entirely. See internal/refverify.
+	RefVerify *refverify.Verifier
 	// EastWest authorizes agent-to-agent (east-west) calls in the
 	// agent-as-tool model: a zone model with default-deny that keeps a
 	// compromised agent from recruiting agents in other zones. Runs before
@@ -433,7 +441,34 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 				"action guard blocked", agRes.Reason)
 		case actionguard.VerdictEscalate:
-			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, agRes.Reason, false, start); escResp != nil {
+			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckPolicy, agRes.Reason, false, start); escResp != nil {
+				return escResp
+			}
+		}
+	}
+
+	// Check 3c-bis (OPT-IN): reference verification. Before a payment leaves
+	// the gateway, verify the payee/destination against the system-of-record
+	// vendor master. A match falls through; a mismatch, an unknown payee, or an
+	// unavailable reference source quarantines the call (holds for human
+	// approval) — never pay a payee we cannot verify. No-op when RefVerify is
+	// nil. Verification is stateless: it depends only on the call and the master.
+	if h.cfg.RefVerify != nil {
+		rvStart := time.Now()
+		rvRes := h.cfg.RefVerify.Check(params.Name, params.Arguments)
+		h.cfg.Metrics.ObserveCheck("refverify", string(rvRes.Verdict), time.Since(rvStart))
+		switch rvRes.Verdict {
+		case refverify.VerdictBlock:
+			h.cfg.Logger.Info("mcp tools/call blocked",
+				"tool", params.Name, "check", "refverify", "agent", capResult.agentID,
+				"rule", rvRes.Rule, "reason", rvRes.Reason)
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckRefVerify,
+				fmt.Sprintf("reference verification blocked (%s): %s", rvRes.Rule, rvRes.Reason), start, 0)
+			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+				"reference verification failed", rvRes.Reason)
+		case refverify.VerdictQuarantine:
+			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckRefVerify, rvRes.Reason, false, start); escResp != nil {
 				return escResp
 			}
 		}
@@ -536,7 +571,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	// CodePolicyFailed block — the agent doesn't need to know the
 	// flow took a detour through human review.
 	if polResult.escalate {
-		if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, polResult.reason, polResult.requiresStepUp, start); escResp != nil {
+		if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckPolicy, polResult.reason, polResult.requiresStepUp, start); escResp != nil {
 			return escResp
 		}
 	}
@@ -1123,6 +1158,7 @@ func (h *mcpHandler) runApprovalFlow(
 	params *mcp.ToolCallParams,
 	capResult capabilityCheckResult,
 	intResult intentCheckResult,
+	originCheck audit.Check,
 	policyReason string,
 	requiresStepUp bool,
 	start time.Time,
@@ -1132,7 +1168,7 @@ func (h *mcpHandler) runApprovalFlow(
 	if h.cfg.Approvals == nil {
 		reason := "escalation required but no approvals queue configured (set INTENTGATE_APPROVAL_QUEUE)"
 		h.emitAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, audit.CheckPolicy, reason, start, 0,
+			audit.DecisionBlock, originCheck, reason, start, 0,
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation required", reason)
@@ -1157,7 +1193,7 @@ func (h *mcpHandler) runApprovalFlow(
 		reason := "approval queue: " + err.Error()
 		h.cfg.Logger.Error("approval enqueue failed", "err", err, "tool", params.Name)
 		h.emitAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, audit.CheckPolicy, reason, start, 0,
+			audit.DecisionBlock, originCheck, reason, start, 0,
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation failed", reason)
@@ -1166,7 +1202,7 @@ func (h *mcpHandler) runApprovalFlow(
 	// Audit the escalation. PendingID lets SOC join this event with
 	// the eventual approve / reject / timeout event.
 	h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-		audit.DecisionEscalate, "escalate: "+policyReason, row.PendingID, "", start,
+		audit.DecisionEscalate, originCheck, "escalate: "+policyReason, row.PendingID, "", start,
 		withRequiresStepUp(requiresStepUp))
 
 	timeout := h.cfg.ApprovalTimeout
@@ -1181,7 +1217,7 @@ func (h *mcpHandler) runApprovalFlow(
 		reason := "approval wait: " + werr.Error()
 		h.cfg.Logger.Error("approval wait failed", "err", werr, "pending_id", row.PendingID)
 		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, reason, row.PendingID, "", start,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation failed", reason)
@@ -1198,7 +1234,7 @@ func (h *mcpHandler) runApprovalFlow(
 			reason += ": " + final.DecideNote
 		}
 		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionAllow, reason, row.PendingID, final.DecidedBy, start,
+			audit.DecisionAllow, originCheck, reason, row.PendingID, final.DecidedBy, start,
 			withRequiresStepUp(requiresStepUp))
 		h.cfg.Logger.Info("mcp tools/call approved by human",
 			"tool", params.Name, "agent", capResult.agentID,
@@ -1211,7 +1247,7 @@ func (h *mcpHandler) runApprovalFlow(
 			reason += ": " + final.DecideNote
 		}
 		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, reason, row.PendingID, final.DecidedBy, start,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, final.DecidedBy, start,
 			withRequiresStepUp(requiresStepUp))
 		h.cfg.Logger.Info("mcp tools/call rejected by human",
 			"tool", params.Name, "agent", capResult.agentID,
@@ -1222,7 +1258,7 @@ func (h *mcpHandler) runApprovalFlow(
 	case approvals.StatusTimeout:
 		reason := "approval window expired (" + timeout.String() + ")"
 		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, reason, row.PendingID, "", start,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
 			withRequiresStepUp(requiresStepUp))
 		h.cfg.Logger.Info("mcp tools/call approval timed out",
 			"tool", params.Name, "agent", capResult.agentID,
@@ -1233,7 +1269,7 @@ func (h *mcpHandler) runApprovalFlow(
 	default:
 		reason := "unexpected approval status: " + string(final.Status)
 		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, reason, row.PendingID, "", start,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation failed", reason)
@@ -1250,6 +1286,7 @@ func (h *mcpHandler) emitApprovalAudit(
 	cap capabilityCheckResult,
 	intent intentCheckResult,
 	decision audit.Decision,
+	originCheck audit.Check,
 	reason string,
 	pendingID string,
 	decidedBy string,
@@ -1266,7 +1303,7 @@ func (h *mcpHandler) emitApprovalAudit(
 	}
 
 	e := audit.NewEvent(decision, params.Name)
-	e.Check = audit.CheckPolicy
+	e.Check = originCheck
 	e.Reason = reason
 	e.AgentID = cap.agentID
 	e.ArgKeys = argKeys
