@@ -880,22 +880,47 @@ func main() {
 		"zone_scope", zoneScopeEnabled,
 	)
 
-	// Deception: inline decoy engagement detector. Decoys are loaded from a
-	// JSON set at INTENTGATE_DECEPTION_CONFIG_PATH; unset leaves the detector
-	// nil and the stage a no-op.
+	// Deception: inline decoy engagement detector. Decoys come from a static
+	// JSON file at INTENTGATE_DECEPTION_CONFIG_PATH and/or a live sync from the
+	// console decoy store at INTENTGATE_DECEPTION_SYNC_URL. The file set seeds
+	// the detector so it is armed from the first request; when a sync URL is
+	// set, the active set is refreshed from the console and hot-swapped, so
+	// activating a decoy in the console arms the gateway within one interval.
+	// A failed sync keeps the last-known-good set, so the detector never falls
+	// open. Neither variable set leaves the detector nil and the stage a no-op.
 	var deceptionDetector *deception.Detector
-	if deceptionConfigPath := os.Getenv("INTENTGATE_DECEPTION_CONFIG_PATH"); deceptionConfigPath != "" {
-		decoys, err := deception.LoadConfigFile(deceptionConfigPath)
+	var seedDecoys []deception.Decoy
+	if p := os.Getenv("INTENTGATE_DECEPTION_CONFIG_PATH"); p != "" {
+		ds, err := deception.LoadConfigFile(p)
 		if err != nil {
-			logger.Error("cannot load INTENTGATE_DECEPTION_CONFIG_PATH; deception disabled",
-				"path", deceptionConfigPath, "err", err)
+			logger.Error("cannot load INTENTGATE_DECEPTION_CONFIG_PATH; file set skipped",
+				"path", p, "err", err)
 		} else {
-			deceptionDetector = deception.New(deception.NewStaticRegistry(decoys))
-			logger.Info("deception enabled",
-				"config_path", deceptionConfigPath, "decoys", len(decoys))
+			seedDecoys = ds
+			logger.Info("deception file set loaded", "config_path", p, "decoys", len(ds))
 		}
+	}
+	if syncURL := os.Getenv("INTENTGATE_DECEPTION_SYNC_URL"); syncURL != "" {
+		sr := deception.NewSyncRegistry(seedDecoys)
+		deceptionDetector = deception.New(sr)
+		interval := 15 * time.Second
+		if v := os.Getenv("INTENTGATE_DECEPTION_SYNC_INTERVAL_S"); v != "" {
+			if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+				interval = time.Duration(n) * time.Second
+			}
+		}
+		syncToken := os.Getenv("INTENTGATE_DECEPTION_TOKEN")
+		go sr.RunSync(watchCtx, http.DefaultClient, syncURL, syncToken, interval,
+			func(n int) { logger.Info("deception decoys synced from console", "url", syncURL, "decoys", n) },
+			func(syncErr error) { logger.Warn("deception decoy sync failed; keeping last-known-good set", "err", syncErr) },
+		)
+		logger.Info("deception live sync enabled",
+			"url", syncURL, "interval_s", int(interval/time.Second), "seed_decoys", len(seedDecoys))
+	} else if seedDecoys != nil {
+		deceptionDetector = deception.New(deception.NewStaticRegistry(seedDecoys))
+		logger.Info("deception enabled", "decoys", len(seedDecoys))
 	} else {
-		logger.Info("deception not configured (set INTENTGATE_DECEPTION_CONFIG_PATH to enable)")
+		logger.Info("deception not configured (set INTENTGATE_DECEPTION_CONFIG_PATH or INTENTGATE_DECEPTION_SYNC_URL to enable)")
 	}
 
 	// Optional: mirror trips to the console Monitor. Best-effort; trips are
