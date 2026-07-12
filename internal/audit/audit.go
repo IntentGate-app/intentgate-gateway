@@ -71,6 +71,16 @@ const (
 	// mandatory hold + plan-level correlation). Runs before policy; blocks or
 	// escalates irreversible high-value and create-then-pay actions.
 	CheckActionGuard Check = "action_guard"
+	// CheckRefVerify is the reference-verification (vendor-master) control.
+	// Runs after the action guard and before the segmentation/policy stages:
+	// verifies a payment's payee against the system-of-record vendor master and
+	// quarantines (holds for approval) on mismatch, unknown payee, or an
+	// unavailable reference source (fail-closed). See internal/refverify.
+	CheckRefVerify Check = "reference_verification"
+	// CheckDeception is the inline decoy engagement detector. Blocks (and
+	// contains) a call that touched a decoy: an asset no legitimate agent,
+	// task, or token ever has a reason to reach. See internal/deception.
+	CheckDeception Check = "deception"
 	// CheckEastWest is the agent-to-agent (east-west) zone authorization
 	// (agent-as-tool model, default-deny). Blocks a call from one agent to
 	// another when no zone edge or token allowlist permits it.

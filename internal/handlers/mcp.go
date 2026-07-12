@@ -17,6 +17,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
@@ -122,6 +123,12 @@ type MCPHandlerConfig struct {
 	// action guard and before the segmentation/policy stages. nil disables
 	// the stage entirely. See internal/refverify.
 	RefVerify *refverify.Verifier
+	// Deception is the inline decoy engagement detector. It runs at the
+	// capability stage, before an out-of-scope honey-tool would be denied,
+	// so a decoy touch is caught rather than lost. On a trip it contains
+	// (kill switch + token revoke) and blocks. nil disables the stage. See
+	// internal/deception.
+	Deception *deception.Detector
 	// EastWest authorizes agent-to-agent (east-west) calls in the
 	// agent-as-tool model: a zone model with default-deny that keeps a
 	// compromised agent from recruiting agents in other zones. Runs before
@@ -318,6 +325,50 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	capStart := time.Now()
 	capResult = h.runCapabilityCheck(r, params.Name)
 	h.cfg.Metrics.ObserveCheck("capability", checkDecision(capResult.err, capResult.summary), time.Since(capStart))
+
+	// Deception: catch a decoy touch inline. This runs before the
+	// capability error is acted on, because a honey-tool is in no token's
+	// scope: if the capability check rejected it as out-of-scope first, the
+	// compromise signal would be lost. A trip fires the kill switch for the
+	// agent and revokes its token in the same second, then blocks.
+	if h.cfg.Deception != nil {
+		dStart := time.Now()
+		var tokenID, tokenTenant string
+		if capResult.token != nil {
+			tokenID = capResult.token.ID
+			tokenTenant = capResult.token.Tenant
+		}
+		dRes := h.cfg.Deception.Check(deception.Input{Tool: params.Name, TokenID: tokenID})
+		dVerdict := "pass"
+		if dRes.Tripped {
+			dVerdict = "tripped"
+		}
+		h.cfg.Metrics.ObserveCheck("deception", dVerdict, time.Since(dStart))
+		if dRes.Tripped {
+			if dRes.Contain {
+				if capResult.agentID != "" && h.cfg.KillSwitch != nil {
+					_ = h.cfg.KillSwitch.Engage(ctx, killswitch.Entry{
+						Type:   killswitch.ScopeAgent,
+						Tenant: tokenTenant,
+						Value:  capResult.agentID,
+						Reason: dRes.Reason,
+						SetAt:  time.Now().UTC(),
+					})
+				}
+				if tokenID != "" && h.cfg.Revocation != nil {
+					_ = h.cfg.Revocation.Revoke(ctx, tokenID, dRes.Reason, tokenTenant)
+				}
+			}
+			h.cfg.Logger.Info("mcp tools/call blocked",
+				"tool", params.Name, "check", "deception", "agent", capResult.agentID,
+				"decoy", dRes.Decoy.Name, "action", string(dRes.Action), "reason", dRes.Reason)
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckDeception, dRes.Reason, start, 0)
+			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+				"deception: decoy touched", dRes.Reason)
+		}
+	}
+
 	if capResult.err != nil {
 		h.cfg.Logger.Info("mcp tools/call blocked",
 			"tool", params.Name, "check", "capability",

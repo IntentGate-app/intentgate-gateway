@@ -13,6 +13,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
@@ -23,6 +24,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policystore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/refverify"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
@@ -177,6 +179,18 @@ type Config struct {
 	// disables the stage; the gateway pipeline is unchanged. Constructed
 	// at startup from INTENTGATE_ACTION_GUARD_*. See internal/actionguard.
 	ActionGuard *actionguard.Guard
+	// RefVerify is the optional reference-verification control: it verifies
+	// a payment's payee against the system-of-record vendor master and
+	// quarantines on mismatch, unknown payee, or an unavailable reference
+	// source (fail-closed). Runs right after the action guard. nil disables
+	// the stage. Constructed at startup from INTENTGATE_REFVERIFY_*.
+	// See internal/refverify.
+	RefVerify *refverify.Verifier
+	// Deception is the optional inline decoy engagement detector. On a
+	// decoy touch it contains (kill switch + token revoke) and blocks.
+	// Constructed at startup from INTENTGATE_DECEPTION_CONFIG_PATH. nil
+	// disables the stage. See internal/deception.
+	Deception *deception.Detector
 	// EastWest is the optional agent-to-agent (east-west) authorization
 	// guard: a zone model with default-deny. nil disables the check.
 	// Constructed at startup from INTENTGATE_EASTWEST_*. See internal/eastwest.
@@ -267,6 +281,8 @@ func New(cfg Config) *http.Server {
 		TenantScope:       cfg.TenantScope,
 		FaultIsolation:    cfg.FaultIsolation,
 		ActionGuard:       cfg.ActionGuard,
+		RefVerify:         cfg.RefVerify,
+		Deception:         cfg.Deception,
 		EastWest:          cfg.EastWest,
 		ZoneScope:         cfg.ZoneScope,
 	}))

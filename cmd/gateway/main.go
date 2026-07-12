@@ -166,6 +166,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
+	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
@@ -175,6 +176,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policystore"
+	"github.com/IntentGate-app/intentgate-gateway/internal/refverify"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/server"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
@@ -253,6 +255,15 @@ func main() {
 	actionGuardEnabled := envOr("INTENTGATE_ACTION_GUARD_ENABLED", "") == "true"
 	actionGuardEscalateOverCentsRaw := envOr("INTENTGATE_ACTION_GUARD_ESCALATE_OVER_CENTS", "500000")
 	actionGuardBlockUnboundedDelete := envOr("INTENTGATE_ACTION_GUARD_BLOCK_UNBOUNDED_DELETE", "true") != "false"
+	// Reference verification (vendor-master check on payees). Off by default.
+	// When enabled, a payment's payee is verified against the vendor master
+	// loaded from INTENTGATE_REFVERIFY_CONFIG_PATH; a mismatch, unknown payee,
+	// or unavailable source quarantines the call (fail-closed). See
+	// internal/refverify.
+	refVerifyEnabled := envOr("INTENTGATE_REFVERIFY_ENABLED", "") == "true"
+	refVerifyConfigPath := envOr("INTENTGATE_REFVERIFY_CONFIG_PATH", "")
+	refVerifyMinCentsRaw := envOr("INTENTGATE_REFVERIFY_MIN_CENTS", "0")
+	refVerifyFailClosed := envOr("INTENTGATE_REFVERIFY_FAIL_CLOSED", "true") != "false"
 	// East-west (agent-to-agent) authorization. Off by default. When enabled,
 	// a call to a tool named "<prefix><agent-id>" is treated as an agent-to-
 	// agent call and evaluated against a zone model with default-deny. The
@@ -487,6 +498,41 @@ func main() {
 		)
 	} else {
 		logger.Info("action guard not configured (set INTENTGATE_ACTION_GUARD_ENABLED=true to enable)")
+	}
+
+	var refVerify *refverify.Verifier
+	if refVerifyEnabled {
+		refVerifyMinCents, err := strconv.ParseInt(refVerifyMinCentsRaw, 10, 64)
+		if err != nil {
+			logger.Error("invalid INTENTGATE_REFVERIFY_MIN_CENTS", "err", err)
+			os.Exit(1)
+		}
+		var master refverify.VendorMaster
+		if refVerifyConfigPath != "" {
+			records, err := refverify.LoadConfigFile(refVerifyConfigPath)
+			if err != nil {
+				// Fail-closed: keep the verifier enabled with a nil master so
+				// payments quarantine rather than silently pass while the
+				// vendor master is misconfigured.
+				logger.Error("cannot load INTENTGATE_REFVERIFY_CONFIG_PATH; reference verification will fail-closed",
+					"path", refVerifyConfigPath, "err", err)
+			} else {
+				master = refverify.NewStaticVendorMaster(records)
+			}
+		}
+		refVerify = refverify.New(refverify.Config{
+			Master:     master,
+			MinCents:   refVerifyMinCents,
+			FailClosed: refVerifyFailClosed,
+		})
+		logger.Info("reference verification enabled",
+			"config_path", refVerifyConfigPath,
+			"min_cents", refVerifyMinCents,
+			"fail_closed", refVerifyFailClosed,
+			"master_loaded", master != nil,
+		)
+	} else {
+		logger.Info("reference verification not configured (set INTENTGATE_REFVERIFY_ENABLED=true to enable)")
 	}
 
 	var eastWest *eastwest.Guard
@@ -834,6 +880,24 @@ func main() {
 		"zone_scope", zoneScopeEnabled,
 	)
 
+	// Deception: inline decoy engagement detector. Decoys are loaded from a
+	// JSON set at INTENTGATE_DECEPTION_CONFIG_PATH; unset leaves the detector
+	// nil and the stage a no-op.
+	var deceptionDetector *deception.Detector
+	if deceptionConfigPath := os.Getenv("INTENTGATE_DECEPTION_CONFIG_PATH"); deceptionConfigPath != "" {
+		decoys, err := deception.LoadConfigFile(deceptionConfigPath)
+		if err != nil {
+			logger.Error("cannot load INTENTGATE_DECEPTION_CONFIG_PATH; deception disabled",
+				"path", deceptionConfigPath, "err", err)
+		} else {
+			deceptionDetector = deception.New(deception.NewStaticRegistry(decoys))
+			logger.Info("deception enabled",
+				"config_path", deceptionConfigPath, "decoys", len(decoys))
+		}
+	} else {
+		logger.Info("deception not configured (set INTENTGATE_DECEPTION_CONFIG_PATH to enable)")
+	}
+
 	srv := server.New(server.Config{
 		Addr:                  addr,
 		Logger:                logger,
@@ -863,6 +927,8 @@ func main() {
 		TenantScope:           tenantScopeEnforcer,
 		FaultIsolation:        faultIsolator,
 		ActionGuard:           actionGuard,
+		RefVerify:             refVerify,
+		Deception:             deceptionDetector,
 		EastWest:              eastWest,
 		ZoneScope:             zoneScope,
 		AgentToolPrefix:       eastWestPrefix,

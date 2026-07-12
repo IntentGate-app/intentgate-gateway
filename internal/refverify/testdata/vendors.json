@@ -1,0 +1,13 @@
+{
+  "vendors": [
+    {
+      "payee": "ACME BV",
+      "name": "ACME Beheer BV",
+      "aliases": ["ACME-BV", "NL00ACME0000000000"]
+    },
+    {
+      "payee": "Globex NV",
+      "name": "Globex Corporation NV"
+    }
+  ]
+}
