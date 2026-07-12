@@ -129,6 +129,10 @@ type MCPHandlerConfig struct {
 	// (kill switch + token revoke) and blocks. nil disables the stage. See
 	// internal/deception.
 	Deception *deception.Detector
+	// DeceptionReporter mirrors a trip to the console Monitor
+	// (best-effort). nil disables mirroring; trips are still recorded in
+	// the gateway audit and SIEM regardless.
+	DeceptionReporter deception.Reporter
 	// EastWest authorizes agent-to-agent (east-west) calls in the
 	// agent-as-tool model: a zone model with default-deny that keeps a
 	// compromised agent from recruiting agents in other zones. Runs before
@@ -358,6 +362,21 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 				if tokenID != "" && h.cfg.Revocation != nil {
 					_ = h.cfg.Revocation.Revoke(ctx, tokenID, dRes.Reason, tokenTenant)
 				}
+			}
+			if h.cfg.DeceptionReporter != nil {
+				agent := capResult.agentID
+				if agent == "" {
+					agent = "unattributed agent"
+				}
+				go h.cfg.DeceptionReporter.Report(context.Background(), deception.Trip{
+					DecoyID:     dRes.Decoy.ID,
+					DecoyName:   dRes.Decoy.Name,
+					Pillar:      dRes.Decoy.Pillar,
+					Agent:       agent,
+					Severity:    string(dRes.Severity),
+					ActionTaken: string(dRes.Action),
+					Detail:      dRes.Reason,
+				})
 			}
 			h.cfg.Logger.Info("mcp tools/call blocked",
 				"tool", params.Name, "check", "deception", "agent", capResult.agentID,

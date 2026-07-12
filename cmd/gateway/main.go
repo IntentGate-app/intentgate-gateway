@@ -898,6 +898,18 @@ func main() {
 		logger.Info("deception not configured (set INTENTGATE_DECEPTION_CONFIG_PATH to enable)")
 	}
 
+	// Optional: mirror trips to the console Monitor. Best-effort; trips are
+	// recorded in the gateway audit regardless. Reuses the deception token.
+	var deceptionReporter deception.Reporter
+	if hr := deception.NewHTTPReporter(
+		os.Getenv("INTENTGATE_DECEPTION_TRIP_URL"),
+		os.Getenv("INTENTGATE_DECEPTION_TOKEN"),
+	); hr != nil {
+		deceptionReporter = hr
+		logger.Info("deception trip mirroring enabled",
+			"url", os.Getenv("INTENTGATE_DECEPTION_TRIP_URL"))
+	}
+
 	srv := server.New(server.Config{
 		Addr:                  addr,
 		Logger:                logger,
@@ -929,6 +941,7 @@ func main() {
 		ActionGuard:           actionGuard,
 		RefVerify:             refVerify,
 		Deception:             deceptionDetector,
+		DeceptionReporter:     deceptionReporter,
 		EastWest:              eastWest,
 		ZoneScope:             zoneScope,
 		AgentToolPrefix:       eastWestPrefix,

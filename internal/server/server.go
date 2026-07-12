@@ -191,6 +191,10 @@ type Config struct {
 	// Constructed at startup from INTENTGATE_DECEPTION_CONFIG_PATH. nil
 	// disables the stage. See internal/deception.
 	Deception *deception.Detector
+	// DeceptionReporter mirrors trips to the console Monitor (best-effort).
+	// nil disables mirroring; trips are still recorded in the gateway audit.
+	// Constructed at startup from INTENTGATE_DECEPTION_TRIP_URL.
+	DeceptionReporter deception.Reporter
 	// EastWest is the optional agent-to-agent (east-west) authorization
 	// guard: a zone model with default-deny. nil disables the check.
 	// Constructed at startup from INTENTGATE_EASTWEST_*. See internal/eastwest.
@@ -283,6 +287,7 @@ func New(cfg Config) *http.Server {
 		ActionGuard:       cfg.ActionGuard,
 		RefVerify:         cfg.RefVerify,
 		Deception:         cfg.Deception,
+		DeceptionReporter: cfg.DeceptionReporter,
 		EastWest:          cfg.EastWest,
 		ZoneScope:         cfg.ZoneScope,
 	}))
