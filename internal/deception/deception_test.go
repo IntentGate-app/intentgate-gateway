@@ -104,6 +104,45 @@ func TestNilRegistryNeverTrips(t *testing.T) {
 	}
 }
 
+func TestHoneyRecordValueTrips(t *testing.T) {
+	reg := NewStaticRegistry([]Decoy{
+		{ID: "r", Name: "Honey vendor record", Kind: HoneyRecord, Key: "ACME-SHELL-LTD", Pillar: "data", OnTrip: OnTripHold},
+	})
+	d := New(reg)
+	if !d.Check(Input{Tool: "pay", Values: []string{"acme-shell-ltd"}}).Tripped {
+		t.Fatal("acting on a seeded honey-record value should trip")
+	}
+	if d.Check(Input{Tool: "pay", Values: []string{"real-vendor-42"}}).Tripped {
+		t.Fatal("a non-decoy value must not trip")
+	}
+}
+
+func TestLeakedCredentialValueTripsAndContains(t *testing.T) {
+	reg := NewStaticRegistry([]Decoy{
+		{ID: "k", Name: "Leaked key", Kind: HoneyCredential, Key: "AKIA-DECOY-9", OnTrip: OnTripContain},
+	})
+	r := New(reg).Check(Input{Tool: "s3_get", Values: []string{"AKIA-DECOY-9"}})
+	if !r.Tripped || !r.Contain {
+		t.Fatalf("passing a leaked decoy key as an argument should trip+contain, got %+v", r)
+	}
+}
+
+func TestValuesFromArgsWalksNested(t *testing.T) {
+	vals := ValuesFromArgs(map[string]any{
+		"payee":  "ACME-SHELL-LTD",
+		"amount": 4800,
+		"nested": map[string]any{"key": "AKIA-DECOY-9"},
+		"list":   []any{"x", "y"},
+	})
+	want := map[string]bool{"ACME-SHELL-LTD": true, "AKIA-DECOY-9": true, "x": true, "y": true}
+	for _, v := range vals {
+		delete(want, v)
+	}
+	if len(want) != 0 {
+		t.Fatalf("ValuesFromArgs missed values: %v (got %v)", want, vals)
+	}
+}
+
 func TestTokenBeatsToolWhenBothDecoys(t *testing.T) {
 	reg := NewStaticRegistry([]Decoy{
 		{ID: "t", Name: "tool", Kind: HoneyTool, Key: "x", OnTrip: OnTripAlert},

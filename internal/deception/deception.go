@@ -99,10 +99,40 @@ type Registry interface {
 // empty; the detector checks each populated dimension against the
 // matching decoy kind.
 type Input struct {
-	Tool         string // tool being called
-	TokenID      string // capability token id (JTI) presented
-	Zone         string // zone or service being reached
-	CredentialID string // brokered credential id being used
+	Tool         string   // tool being called
+	TokenID      string   // capability token id (JTI) presented
+	Zone         string   // zone or service being reached
+	CredentialID string   // brokered credential id being used
+	Values       []string // argument values on the call (payee ids, keys, ...)
+}
+
+// ValuesFromArgs flattens a tool call's arguments into the string values
+// the detector matches against honey-record and honey-credential decoys.
+// It walks nested maps and slices so a payee id or a leaked key is caught
+// wherever it sits in the arguments.
+func ValuesFromArgs(args map[string]any) []string {
+	out := make([]string, 0, len(args))
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			if t != "" {
+				out = append(out, t)
+			}
+		case map[string]any:
+			for _, vv := range t {
+				walk(vv)
+			}
+		case []any:
+			for _, vv := range t {
+				walk(vv)
+			}
+		}
+	}
+	for _, v := range args {
+		walk(v)
+	}
+	return out
 }
 
 // StaticRegistry is an in-memory Registry indexed by kind. It is the
@@ -112,6 +142,7 @@ type StaticRegistry struct {
 	tokens map[string]Decoy
 	zones  map[string]Decoy
 	creds  map[string]Decoy
+	values map[string]Decoy // honey-record / leaked-key values seen in args
 }
 
 // NewStaticRegistry indexes the given decoys by kind. Only decoy kinds the
@@ -124,6 +155,7 @@ func NewStaticRegistry(decoys []Decoy) *StaticRegistry {
 		tokens: map[string]Decoy{},
 		zones:  map[string]Decoy{},
 		creds:  map[string]Decoy{},
+		values: map[string]Decoy{},
 	}
 	for _, d := range decoys {
 		if d.Key == "" {
@@ -137,7 +169,14 @@ func NewStaticRegistry(decoys []Decoy) *StaticRegistry {
 		case DecoyZone:
 			r.zones[norm(d.Key)] = d
 		case HoneyCredential:
+			// A leaked decoy key can be presented as a brokered credential
+			// id or passed as a call argument, so index it both ways.
 			r.creds[d.Key] = d
+			r.values[norm(d.Key)] = d
+		case HoneyRecord:
+			// A seeded fake value (a payee id, a record key) is caught when
+			// the agent acts on it, i.e. passes it as a call argument.
+			r.values[norm(d.Key)] = d
 		}
 	}
 	return r
@@ -159,6 +198,14 @@ func (r *StaticRegistry) Match(in Input) (Decoy, bool) {
 	}
 	if in.CredentialID != "" {
 		if d, ok := r.creds[in.CredentialID]; ok {
+			return d, true
+		}
+	}
+	for _, v := range in.Values {
+		if v == "" {
+			continue
+		}
+		if d, ok := r.values[norm(v)]; ok {
 			return d, true
 		}
 	}

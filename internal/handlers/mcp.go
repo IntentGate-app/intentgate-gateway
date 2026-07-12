@@ -342,7 +342,11 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			tokenID = capResult.token.ID
 			tokenTenant = capResult.token.Tenant
 		}
-		dRes := h.cfg.Deception.Check(deception.Input{Tool: params.Name, TokenID: tokenID})
+		dRes := h.cfg.Deception.Check(deception.Input{
+			Tool:    params.Name,
+			TokenID: tokenID,
+			Values:  deception.ValuesFromArgs(params.Arguments),
+		})
 		dVerdict := "pass"
 		if dRes.Tripped {
 			dVerdict = "tripped"
