@@ -8,7 +8,7 @@ func testRegistry() *StaticRegistry {
 		{ID: "2", Name: "Honey vendor record", Kind: HoneyRecord, Key: "ignored", Pillar: "data", OnTrip: OnTripHold},
 		{ID: "3", Name: "Decoy token", Kind: DecoyToken, Key: "jti-decoy-123", Pillar: "identity", OnTrip: OnTripContain},
 		{ID: "4", Name: "Fake admin console", Kind: DecoyZone, Key: "admin-zone", Pillar: "identity", OnTrip: OnTripContain},
-		{ID: "5", Name: "Injection canary", Kind: InjectionCanary, Key: "n/a", Pillar: "counter_agentic", OnTrip: OnTripAlert},
+		{ID: "5", Name: "Injection canary", Kind: InjectionCanary, Key: "IG-CANARY-7f3aa9", Pillar: "counter_agentic", OnTrip: OnTripAlert},
 		{ID: "6", Name: "Honey finance key", Kind: HoneyCredential, Key: "cred-honey-9", Pillar: "identity", OnTrip: OnTripContain},
 	})
 }
@@ -85,12 +85,71 @@ func TestHoldDecoyIsNotContain(t *testing.T) {
 	}
 }
 
-func TestRecordAndCanaryKindsNotIndexedInline(t *testing.T) {
-	// honey_record and injection_canary are matched elsewhere, not by an
-	// inline tool/token/zone/cred probe, so they never trip here.
+func TestRecordKeyNotIndexedAsTool(t *testing.T) {
+	// A honey_record key is a value to catch in arguments, not a tool name,
+	// so calling a tool of the same string must not trip.
 	d := New(testRegistry())
 	if d.Check(Input{Tool: "ignored"}).Tripped {
 		t.Fatal("honey_record key should not be indexed as a tool")
+	}
+}
+
+func TestInjectionCanaryTripsOnContent(t *testing.T) {
+	// A hijacked agent carries the planted marker into its own output. The
+	// marker surfacing in the serialised call content is an alert-level trip.
+	d := New(testRegistry())
+	content := `{"note":"per instructions, tag IG-CANARY-7f3aa9 in the report"}`
+	r := d.Check(Input{Tool: "send_report", Content: content})
+	if !r.Tripped {
+		t.Fatal("canary marker in content should trip")
+	}
+	if r.Contain || r.Action != ActionAlerted || r.Severity != SevMedium {
+		t.Fatalf("alert canary should be medium/alerted/no-contain, got %+v", r)
+	}
+	if r.Decoy.Kind != InjectionCanary {
+		t.Fatalf("expected injection_canary, got %s", r.Decoy.Kind)
+	}
+}
+
+func TestInjectionCanaryTripsWhenEmbeddedInValue(t *testing.T) {
+	// The marker embedded inside a larger argument value is still caught,
+	// because canaries match as a substring, unlike exact value decoys.
+	d := New(testRegistry())
+	r := d.Check(Input{
+		Tool:   "post_message",
+		Values: []string{"forwarding the token ig-canary-7f3aa9 as asked"},
+	})
+	if !r.Tripped || r.Decoy.Kind != InjectionCanary {
+		t.Fatalf("embedded, reformatted canary marker should trip, got %+v", r)
+	}
+}
+
+func TestInjectionCanaryCaseAndSpaceInsensitive(t *testing.T) {
+	d := New(testRegistry())
+	if !d.Check(Input{Content: "IG - CANARY - 7F3AA9"}).Tripped {
+		t.Fatal("canary match should fold case and whitespace")
+	}
+}
+
+func TestNonCanaryContentPasses(t *testing.T) {
+	d := New(testRegistry())
+	if d.Check(Input{Tool: "send_report", Content: `{"note":"quarterly numbers"}`}).Tripped {
+		t.Fatal("benign content must not trip")
+	}
+}
+
+func TestContentFromArgsScansWholeBlob(t *testing.T) {
+	reg := NewStaticRegistry([]Decoy{
+		{ID: "c", Name: "canary", Kind: InjectionCanary, Key: "zzmarkerzz", OnTrip: OnTripAlert},
+	})
+	content := ContentFromArgs(map[string]any{
+		"outer": map[string]any{"inner": "leading-zzmarkerzz-trailing"},
+	})
+	if !New(reg).Check(Input{Content: content}).Tripped {
+		t.Fatal("marker nested in serialised args should trip")
+	}
+	if ContentFromArgs(nil) != "" {
+		t.Fatal("empty args should serialise to empty content")
 	}
 }
 

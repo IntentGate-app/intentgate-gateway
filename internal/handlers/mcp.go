@@ -346,6 +346,7 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			Tool:    params.Name,
 			TokenID: tokenID,
 			Values:  deception.ValuesFromArgs(params.Arguments),
+			Content: deception.ContentFromArgs(params.Arguments),
 		})
 		dVerdict := "pass"
 		if dRes.Tripped {

@@ -1,10 +1,11 @@
 // Package deception is the inline engagement detector for the agent
 // deception fabric. It recognises, on the hot path, when an agent call
 // touches a decoy: a honey-tool advertised but in no token's scope, a
-// decoy capability token, a decoy zone/service, or a planted
-// honey-credential. A decoy is something no legitimate agent, task, or
-// token ever has a reason to touch, so a single match is proof of
-// compromise, not a probabilistic anomaly.
+// decoy capability token, a decoy zone/service, a planted honey-credential
+// or honey-record value, or an injection-canary marker the agent carries
+// into its own output after obeying injected content. A decoy is something
+// no legitimate agent, task, or token ever has a reason to touch, so a
+// single match is proof of compromise, not a probabilistic anomaly.
 //
 //	no match -> pass (fall through to the rest of the pipeline)
 //	match    -> trip (contain per the decoy's on-trip setting)
@@ -25,6 +26,7 @@ import (
 	"encoding/json"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -104,6 +106,14 @@ type Input struct {
 	Zone         string   // zone or service being reached
 	CredentialID string   // brokered credential id being used
 	Values       []string // argument values on the call (payee ids, keys, ...)
+	// Content is free text the agent itself produced: the serialised
+	// arguments of a tool call, or an outbound reply. It is scanned for a
+	// planted injection-canary marker. A canary is a unique string seeded
+	// into content an agent may retrieve; a prompt injection that hijacks
+	// the agent gets the agent to carry that marker into what it does next.
+	// Seeing the marker in the agent's own output is proof the injection was
+	// obeyed, so it is caught here rather than by trying to read intent.
+	Content string
 }
 
 // ValuesFromArgs flattens a tool call's arguments into the string values
@@ -135,20 +145,47 @@ func ValuesFromArgs(args map[string]any) []string {
 	return out
 }
 
+// ContentFromArgs serialises a tool call's arguments to a single string for
+// injection-canary scanning. Unlike ValuesFromArgs, which pulls out leaf
+// string values, this keeps the whole argument blob so a marker embedded
+// anywhere in the structure is scanned. Best-effort: an unmarshalable value
+// yields an empty string, in which case leaf-value scanning still applies.
+func ContentFromArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// canary is one injection-canary marker: the normalised marker string and
+// the decoy it belongs to. Markers are matched as substrings of the agent's
+// own output, not by exact key, so a marker carried inside a larger value is
+// still caught.
+type canary struct {
+	marker string
+	decoy  Decoy
+}
+
 // StaticRegistry is an in-memory Registry indexed by kind. It is the
 // embedded decoy set used before a live sync from the console decoy store.
 type StaticRegistry struct {
-	tools  map[string]Decoy
-	tokens map[string]Decoy
-	zones  map[string]Decoy
-	creds  map[string]Decoy
-	values map[string]Decoy // honey-record / leaked-key values seen in args
+	tools    map[string]Decoy
+	tokens   map[string]Decoy
+	zones    map[string]Decoy
+	creds    map[string]Decoy
+	values   map[string]Decoy // honey-record / leaked-key values seen in args
+	canaries []canary         // injection-canary markers, scanned as substrings
 }
 
-// NewStaticRegistry indexes the given decoys by kind. Only decoy kinds the
-// gateway can observe inline are indexed (honey-tool, decoy-token,
-// decoy-zone, honey-credential); record- and content-level decoys are
-// matched elsewhere and are ignored here.
+// NewStaticRegistry indexes the given decoys by kind. Exact-match kinds
+// (honey-tool, decoy-token, decoy-zone, honey-credential, honey-record) go
+// into their maps; the injection-canary kind is a content-level marker and
+// is scanned as a substring of the agent's own output. Breadcrumbs are lures
+// with no trip of their own and are not indexed.
 func NewStaticRegistry(decoys []Decoy) *StaticRegistry {
 	r := &StaticRegistry{
 		tools:  map[string]Decoy{},
@@ -177,8 +214,20 @@ func NewStaticRegistry(decoys []Decoy) *StaticRegistry {
 			// A seeded fake value (a payee id, a record key) is caught when
 			// the agent acts on it, i.e. passes it as a call argument.
 			r.values[norm(d.Key)] = d
+		case InjectionCanary:
+			if m := norm(d.Key); m != "" {
+				r.canaries = append(r.canaries, canary{marker: m, decoy: d})
+			}
 		}
 	}
+	// Deterministic scan order when a call somehow carries more than one
+	// marker: longest marker first (most specific), then lexical.
+	sort.Slice(r.canaries, func(i, j int) bool {
+		if len(r.canaries[i].marker) != len(r.canaries[j].marker) {
+			return len(r.canaries[i].marker) > len(r.canaries[j].marker)
+		}
+		return r.canaries[i].marker < r.canaries[j].marker
+	})
 	return r
 }
 
@@ -212,6 +261,29 @@ func (r *StaticRegistry) Match(in Input) (Decoy, bool) {
 	if in.Zone != "" {
 		if d, ok := r.zones[norm(in.Zone)]; ok {
 			return d, true
+		}
+	}
+	// Injection-canary markers are scanned last, as substrings of the
+	// agent's own output: its serialised call arguments and any outbound
+	// content. norm folds case and strips whitespace, so a marker survives
+	// reformatting or being embedded in a larger string.
+	if len(r.canaries) > 0 {
+		hay := norm(in.Content)
+		vals := make([]string, 0, len(in.Values))
+		for _, v := range in.Values {
+			if v != "" {
+				vals = append(vals, norm(v))
+			}
+		}
+		for _, c := range r.canaries {
+			if hay != "" && strings.Contains(hay, c.marker) {
+				return c.decoy, true
+			}
+			for _, v := range vals {
+				if strings.Contains(v, c.marker) {
+					return c.decoy, true
+				}
+			}
 		}
 	}
 	return Decoy{}, false
