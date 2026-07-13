@@ -150,6 +150,13 @@ type MCPHandlerConfig struct {
 	// back to 5 minutes — operators with on-call humans can lower
 	// this; deployments with offline reviewers should raise it.
 	ApprovalTimeout time.Duration
+	// ApprovalAsync switches the human-approval hold from synchronous
+	// (block the request until a decision or the timeout) to async: the
+	// gateway returns CodeApprovalPending with the pending id immediately
+	// and the agent resumes by retrying with the resume header. Default
+	// false preserves the blocking behaviour. Set from
+	// INTENTGATE_APPROVAL_ASYNC.
+	ApprovalAsync bool
 	// ArgRedaction controls whether the gateway persists a redacted
 	// view of tool-call argument values onto each audit event (see
 	// [audit.RedactionMode]). Default RedactOff preserves the strict
@@ -562,7 +569,11 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 				"reference verification failed", rvRes.Reason)
 		case refverify.VerdictQuarantine:
-			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckRefVerify, rvRes.Reason, false, start); escResp != nil {
+			// Label the escalation with the refverify verdict and the rule
+			// that fired, so the audit trail shows why a human was asked,
+			// symmetric with the block path above.
+			rvReason := fmt.Sprintf("reference verification quarantine (%s): %s", rvRes.Rule, rvRes.Reason)
+			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckRefVerify, rvReason, false, start); escResp != nil {
 				return escResp
 			}
 		}
@@ -1242,6 +1253,11 @@ type intentCheckResult struct {
 // HTTP clients won't drop the connection."
 const defaultApprovalTimeout = 5 * time.Minute
 
+// headerApprovalID is the request header an agent sets to resume a call that
+// was held for async approval (INTENTGATE_APPROVAL_ASYNC=true), carrying the
+// pending id the gateway handed back with CodeApprovalPending.
+const headerApprovalID = "X-IntentGate-Approval-Id"
+
 // runApprovalFlow handles the escalate path. Returns a non-nil
 // JSON-RPC response when the call should NOT proceed (queue
 // misconfigured, enqueue error, rejected, timed out). Returns nil
@@ -1268,6 +1284,16 @@ func (h *mcpHandler) runApprovalFlow(
 			withRequiresStepUp(requiresStepUp))
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation required", reason)
+	}
+
+	// Async resume: the agent is retrying a previously held call, carrying
+	// the pending id it was handed. Apply the recorded decision instead of
+	// enqueuing a duplicate. Only consulted in async mode.
+	if h.cfg.ApprovalAsync {
+		if resumeID := strings.TrimSpace(r.Header.Get(headerApprovalID)); resumeID != "" {
+			return h.resumeApproval(ctx, r, req, params, capResult, intResult,
+				originCheck, requiresStepUp, resumeID, start)
+		}
 	}
 
 	pending := approvals.PendingRequest{
@@ -1300,6 +1326,21 @@ func (h *mcpHandler) runApprovalFlow(
 	h.emitApprovalAudit(ctx, r, params, capResult, intResult,
 		audit.DecisionEscalate, originCheck, "escalate: "+policyReason, row.PendingID, "", start,
 		withRequiresStepUp(requiresStepUp))
+
+	// Async hold: hand the agent the pending id and return immediately,
+	// rather than holding the connection open for the whole approval
+	// window. The agent resumes by retrying the same call with the resume
+	// header. The escalate audit above already records the hold.
+	if h.cfg.ApprovalAsync {
+		h.cfg.Logger.Info("mcp tools/call held for async approval",
+			"tool", params.Name, "agent", capResult.agentID, "pending_id", row.PendingID)
+		return mcp.NewErrorResponse(req.ID, mcp.CodeApprovalPending, "approval pending",
+			map[string]any{
+				"pending_id":    row.PendingID,
+				"status":        "pending",
+				"resume_header": headerApprovalID,
+			})
+	}
 
 	timeout := h.cfg.ApprovalTimeout
 	if timeout <= 0 {
@@ -1370,6 +1411,113 @@ func (h *mcpHandler) runApprovalFlow(
 		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
 			"policy escalation failed", reason)
 	}
+}
+
+// resumeApproval applies the recorded decision for a held call the agent is
+// retrying with headerApprovalID. It first verifies the resumed request is the
+// exact call that was escalated (same actor, tenant, tool, and arguments) so
+// an approval can never be replayed against a different action, then acts on
+// the stored status. Only reached in async mode.
+func (h *mcpHandler) resumeApproval(
+	ctx context.Context,
+	r *http.Request,
+	req *mcp.Request,
+	params *mcp.ToolCallParams,
+	capResult capabilityCheckResult,
+	intResult intentCheckResult,
+	originCheck audit.Check,
+	requiresStepUp bool,
+	resumeID string,
+	start time.Time,
+) *mcp.Response {
+	row, err := h.cfg.Approvals.Get(ctx, resumeID)
+	if err != nil {
+		reason := "approval id not found or expired: " + resumeID
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, originCheck, reason, resumeID, "", start,
+			withRequiresStepUp(requiresStepUp))
+		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+			"approval id not found", reason)
+	}
+
+	var tenant string
+	if capResult.token != nil {
+		tenant = capResult.token.Tenant
+	}
+	if !sameApprovalCall(row, capResult.agentID, tenant, params) {
+		reason := "resume approval id does not match this call"
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
+			withRequiresStepUp(requiresStepUp))
+		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+			"approval mismatch", reason)
+	}
+
+	switch row.Status {
+	case approvals.StatusPending:
+		// Still waiting on a human. Tell the agent to keep waiting.
+		return mcp.NewErrorResponse(req.ID, mcp.CodeApprovalPending, "approval pending",
+			map[string]any{
+				"pending_id":    row.PendingID,
+				"status":        "pending",
+				"resume_header": headerApprovalID,
+			})
+
+	case approvals.StatusApproved:
+		reason := "approved by " + safeDecidedBy(row)
+		if row.DecideNote != "" {
+			reason += ": " + row.DecideNote
+		}
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionAllow, originCheck, reason, row.PendingID, row.DecidedBy, start,
+			withRequiresStepUp(requiresStepUp))
+		h.cfg.Logger.Info("mcp tools/call resumed after approval",
+			"tool", params.Name, "agent", capResult.agentID,
+			"pending_id", row.PendingID, "by", row.DecidedBy)
+		return nil // proceed: the pipeline continues past the approval gate
+
+	case approvals.StatusRejected:
+		reason := "rejected by " + safeDecidedBy(row)
+		if row.DecideNote != "" {
+			reason += ": " + row.DecideNote
+		}
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, row.DecidedBy, start,
+			withRequiresStepUp(requiresStepUp))
+		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+			"policy: rejected by reviewer", reason)
+
+	case approvals.StatusTimeout:
+		reason := "approval window expired"
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
+			withRequiresStepUp(requiresStepUp))
+		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+			"policy: approval window expired", reason)
+
+	default:
+		reason := "unexpected approval status: " + string(row.Status)
+		h.emitApprovalAudit(ctx, r, params, capResult, intResult,
+			audit.DecisionBlock, originCheck, reason, row.PendingID, "", start,
+			withRequiresStepUp(requiresStepUp))
+		return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+			"policy escalation failed", reason)
+	}
+}
+
+// sameApprovalCall reports whether a resumed request is the exact call that
+// was escalated: same actor, tenant, tool, and arguments. encoding/json emits
+// map keys in sorted order, so the argument comparison is stable.
+func sameApprovalCall(row approvals.PendingRequest, agentID, tenant string, params *mcp.ToolCallParams) bool {
+	if row.AgentID != agentID || row.Tool != params.Name || row.Tenant != tenant {
+		return false
+	}
+	a, err1 := json.Marshal(row.Args)
+	b, err2 := json.Marshal(params.Arguments)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(a) == string(b)
 }
 
 // emitApprovalAudit is emitAudit with two extra fields populated

@@ -139,6 +139,15 @@ const (
 	// payload carries the breaker reason ("circuit_open" or
 	// "bulkhead_full") and the tool name; no upstream payload.
 	CodeUpstreamUnavailable = -32018
+	// CodeApprovalPending is returned when a call is held for human
+	// approval and the gateway is running in async-hold mode
+	// (INTENTGATE_APPROVAL_ASYNC=true) instead of blocking the request.
+	// The response's `data` payload carries { pending_id, status:
+	// "pending", resume_header }. The agent resumes by retrying the same
+	// tool call with the returned pending id in the resume header; the
+	// gateway then applies the recorded decision instead of enqueuing a
+	// duplicate. In the default synchronous mode this code is never sent.
+	CodeApprovalPending = -32019
 )
 
 // NewErrorResponse builds a JSON-RPC 2.0 error response.

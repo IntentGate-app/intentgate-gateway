@@ -89,6 +89,10 @@ type Config struct {
 	// decision before timing out and returning block. Zero falls
 	// back to the handler's default (5 minutes).
 	ApprovalTimeout time.Duration
+	// ApprovalAsync switches the human-approval hold from blocking to
+	// async (return pending immediately, resume by header). Default false
+	// preserves the synchronous hold. See handlers.MCPHandlerConfig.
+	ApprovalAsync bool
 	// Upstream is the configured downstream MCP tool server. nil means
 	// no upstream is configured and the gateway returns its stub allow
 	// for authorized calls. Production deployments always supply one.
@@ -278,6 +282,7 @@ func New(cfg Config) *http.Server {
 		Metrics:           cfg.Metrics,
 		Approvals:         cfg.Approvals,
 		ApprovalTimeout:   cfg.ApprovalTimeout,
+		ApprovalAsync:     cfg.ApprovalAsync,
 		ArgRedaction:      cfg.ArgRedaction,
 		ProvenanceEnabled: cfg.ProvenanceEnabled,
 		PIIFilter:         cfg.PIIFilter,

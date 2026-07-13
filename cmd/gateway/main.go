@@ -337,6 +337,7 @@ func main() {
 	webhookEventsRaw := envOr("INTENTGATE_WEBHOOK_EVENTS", "")
 	approvalsBackend := envOr("INTENTGATE_APPROVALS_BACKEND", "memory")
 	approvalTimeoutS := envOr("INTENTGATE_APPROVAL_TIMEOUT_S", "300")
+	approvalAsync := envOr("INTENTGATE_APPROVAL_ASYNC", "") == "true"
 	// Policy-store backend: "off" disables the draft + promote /
 	// rollback flow entirely (older deployments stay unchanged).
 	// "memory" is the dev default — drafts live in-process and are
@@ -912,7 +913,9 @@ func main() {
 		syncToken := os.Getenv("INTENTGATE_DECEPTION_TOKEN")
 		go sr.RunSync(watchCtx, http.DefaultClient, syncURL, syncToken, interval,
 			func(n int) { logger.Info("deception decoys synced from console", "url", syncURL, "decoys", n) },
-			func(syncErr error) { logger.Warn("deception decoy sync failed; keeping last-known-good set", "err", syncErr) },
+			func(syncErr error) {
+				logger.Warn("deception decoy sync failed; keeping last-known-good set", "err", syncErr)
+			},
 		)
 		logger.Info("deception live sync enabled",
 			"url", syncURL, "interval_s", int(interval/time.Second), "seed_decoys", len(seedDecoys))
@@ -957,6 +960,7 @@ func main() {
 		Tasks:                 taskStore,
 		Approvals:             approvalsStore,
 		ApprovalTimeout:       approvalTimeout,
+		ApprovalAsync:         approvalAsync,
 		ArgRedaction:          argRedaction,
 		ProvenanceEnabled:     provenanceEnabled,
 		PIIFilter:             piiFilter,
