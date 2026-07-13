@@ -325,9 +325,21 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 		intResult intentCheckResult
 	)
 
+	// An agent-to-agent (east-west) call is authorized by the east-west zone
+	// policy (Check 3d), not by the caller's north-south tool scope or
+	// declared intent. Detect it up front from the tool name alone so the
+	// capability and intent stages defer to east-west instead of pre-empting
+	// it with a Check-1/Check-2 denial.
+	eastWestCall := false
+	if h.cfg.EastWest != nil {
+		if _, ok := h.cfg.EastWest.CalleeAgent(params.Name); ok {
+			eastWestCall = true
+		}
+	}
+
 	// Check 1: capability.
 	capStart := time.Now()
-	capResult = h.runCapabilityCheck(r, params.Name)
+	capResult = h.runCapabilityCheck(r, params.Name, eastWestCall)
 	h.cfg.Metrics.ObserveCheck("capability", checkDecision(capResult.err, capResult.summary), time.Since(capStart))
 
 	// Deception: catch a decoy touch inline. This runs before the
@@ -403,18 +415,25 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			"capability check failed", capResult.err.Error())
 	}
 
-	// Check 2: intent.
-	intStart := time.Now()
-	intResult = h.runIntentCheck(ctx, r, params.Name, capResult.agentID)
-	h.cfg.Metrics.ObserveCheck("intent", checkDecision(intResult.err, intResult.summary), time.Since(intStart))
-	if intResult.err != nil {
-		h.cfg.Logger.Info("mcp tools/call blocked",
-			"tool", params.Name, "check", "intent",
-			"agent", capResult.agentID, "reason", intResult.err.Error())
-		h.emitAudit(ctx, r, params, capResult, intResult,
-			audit.DecisionBlock, audit.CheckIntent, intResult.err.Error(), start, 0)
-		return mcp.NewErrorResponse(req.ID, mcp.CodeIntentFailed,
-			"intent check failed", intResult.err.Error())
+	// Check 2: intent. Intent scores a north-south tool call against the
+	// agent's declared plan. An east-west call is agent-to-agent, not a tool
+	// action, so the east-west zone policy is the decider and intent is
+	// skipped rather than allowed to spuriously block a legitimate A2A call.
+	if eastWestCall {
+		intResult = intentCheckResult{summary: "skipped (east-west call)"}
+	} else {
+		intStart := time.Now()
+		intResult = h.runIntentCheck(ctx, r, params.Name, capResult.agentID)
+		h.cfg.Metrics.ObserveCheck("intent", checkDecision(intResult.err, intResult.summary), time.Since(intStart))
+		if intResult.err != nil {
+			h.cfg.Logger.Info("mcp tools/call blocked",
+				"tool", params.Name, "check", "intent",
+				"agent", capResult.agentID, "reason", intResult.err.Error())
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckIntent, intResult.err.Error(), start, 0)
+			return mcp.NewErrorResponse(req.ID, mcp.CodeIntentFailed,
+				"intent check failed", intResult.err.Error())
+		}
 	}
 
 	// Check 2b (OPT-IN): task-level intent binding (goal-drift). Binds
@@ -562,9 +581,11 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	// Check 3d: east-west authorization (agent-to-agent). In the agent-as-tool
 	// model, a call to a tool named like an agent target is one agent calling
 	// another; the guard applies a zone model with default-deny so a
-	// compromised agent cannot recruit agents in other zones. No-op when
-	// EastWest is nil or the call is not an agent-to-agent call.
-	eastWestCall := false
+	// compromised agent cannot recruit agents in other zones. This is the
+	// authoritative decision for an east-west call: the north-south scope and
+	// intent checks above were deferred to it. No-op when EastWest is nil or
+	// the call is not an agent-to-agent call. eastWestCall was set up front
+	// from the tool name and is reaffirmed here from the guard's evaluation.
 	if h.cfg.EastWest != nil {
 		ewStart := time.Now()
 		ewRes := h.cfg.EastWest.Check(capResult.agentID, callerZone, params.Name)
@@ -1465,7 +1486,7 @@ type budgetCheckResult struct {
 // A non-nil error from the revocation store fails closed (treats the
 // token as revoked). A partial outage of the revocation store must
 // not become a quiet authorization bypass.
-func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string) capabilityCheckResult {
+func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string, eastWest bool) capabilityCheckResult {
 	encoded, err := capability.FromAuthorizationHeader(r.Header.Get("Authorization"))
 	if err != nil {
 		return capabilityCheckResult{err: err}
@@ -1546,13 +1567,27 @@ func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string) capability
 		}
 	}
 
+	// East-west (agent-to-agent) calls are authorized by the east-west zone
+	// policy plus the token's callee-allow caveat, not by the caller's
+	// north-south tool scope. Passing EastWest tells Check to skip only the
+	// tool whitelist/blacklist for this call, so east-west can be the
+	// decider instead of being pre-empted by a Check-1 denial. Every other
+	// gate still applies: signature, kill switch, revocation, and required
+	// token above; and expiry, agent-lock, not-before, and max-calls caveats
+	// inside Check. A forged, halted, revoked, expired, or wrong-subject
+	// token is still rejected.
 	if err := tok.Check(capability.RequestContext{
-		AgentID: tok.Subject,
-		Tool:    tool,
+		AgentID:  tok.Subject,
+		Tool:     tool,
+		EastWest: eastWest,
 	}); err != nil {
 		return capabilityCheckResult{agentID: tok.Subject, token: tok, err: err}
 	}
-	return capabilityCheckResult{agentID: tok.Subject, token: tok, summary: "ok"}
+	summary := "ok"
+	if eastWest {
+		summary = "ok (east-west; north-south tool scope deferred to east-west policy)"
+	}
+	return capabilityCheckResult{agentID: tok.Subject, token: tok, summary: summary}
 }
 
 // runIntentCheck reads the X-Intent-Prompt header and asks the

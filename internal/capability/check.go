@@ -12,10 +12,17 @@ import (
 // untrusted request body — and is what CaveatAgentLock compares against.
 // Tool is the MCP method's tool name. Now is injectable for tests; if
 // zero, time.Now() is used.
+//
+// EastWest marks the call as an agent-to-agent (east-west) call. On such a
+// call the tool is an agent target, not a north-south tool, so the tool
+// whitelist/blacklist caveats do not apply — east-west authorization is the
+// gateway zone policy plus the callee-allow caveat. Every other caveat
+// (expiry, agent-lock, not-before, max-calls, step-up) is still enforced.
 type RequestContext struct {
-	AgentID string
-	Tool    string
-	Now     time.Time
+	AgentID  string
+	Tool     string
+	Now      time.Time
+	EastWest bool
 }
 
 // Check evaluates a token's caveats against ctx in order.
@@ -68,12 +75,21 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		return nil
 
 	case CaveatToolWhitelist:
+		// North-south tool scope does not gate an east-west (agent-to-agent)
+		// call: the callee agent is authorized by the gateway zone policy and
+		// the callee-allow caveat, so skip the tool whitelist for such calls.
+		if ctx.EastWest {
+			return nil
+		}
 		if !contains(c.Tools, ctx.Tool) {
 			return fmt.Errorf("tool %q not in allowed set", ctx.Tool)
 		}
 		return nil
 
 	case CaveatToolBlacklist:
+		if ctx.EastWest {
+			return nil
+		}
 		if contains(c.Tools, ctx.Tool) {
 			return fmt.Errorf("tool %q is forbidden", ctx.Tool)
 		}
