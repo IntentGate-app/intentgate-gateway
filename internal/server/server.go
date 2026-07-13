@@ -310,6 +310,8 @@ func New(cfg Config) *http.Server {
 		KillSwitch:        cfg.KillSwitch,
 		Revocation:        cfg.Revocation,
 		Audit:             cfg.Audit,
+		Deception:         cfg.Deception,
+		DeceptionReporter: cfg.DeceptionReporter,
 	}))
 
 	// Prometheus scrape endpoint. Behind a flag because exposing

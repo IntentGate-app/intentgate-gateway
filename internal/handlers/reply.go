@@ -1,14 +1,17 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
+	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
@@ -58,6 +61,15 @@ type ReplyHandlerConfig struct {
 	Revocation revocation.Store
 	// Audit records the round-trip decision (counts only).
 	Audit audit.Emitter
+	// Deception scans the reply for an injection-canary marker. A marker in
+	// the agent's own answer means it obeyed planted content and is leaking
+	// it to the user, so the reply is blocked and the trip recorded. This is
+	// the reply-side counterpart to the inline (tool-call) canary check. nil
+	// disables it. Only the content dimension matters here.
+	Deception *deception.Detector
+	// DeceptionReporter mirrors a reply-side trip to the console, exactly as
+	// the inline detector does. nil disables mirroring.
+	DeceptionReporter deception.Reporter
 }
 
 type replyRequest struct {
@@ -83,7 +95,7 @@ func NewReplyHandler(cfg ReplyHandlerConfig) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 
 		// --- Identify the agent from its capability token ---
-		var tenant, agentID string
+		var tenant, agentID, tokenID string
 		encoded, err := capability.FromAuthorizationHeader(r.Header.Get("Authorization"))
 		if err != nil {
 			replyError(w, http.StatusUnauthorized, "invalid authorization header")
@@ -104,7 +116,7 @@ func NewReplyHandler(cfg ReplyHandlerConfig) http.Handler {
 				replyError(w, http.StatusUnauthorized, "capability token verification failed")
 				return
 			}
-			tenant, agentID = tok.Tenant, tok.Subject
+			tenant, agentID, tokenID = tok.Tenant, tok.Subject, tok.ID
 
 			if cfg.Revocation != nil {
 				revoked, rerr := cfg.Revocation.IsRevoked(r.Context(), tok.ID, tok.Tenant)
@@ -131,6 +143,51 @@ func NewReplyHandler(cfg ReplyHandlerConfig) http.Handler {
 		if derr := dec.Decode(&body); derr != nil {
 			replyError(w, http.StatusBadRequest, "invalid JSON: "+derr.Error())
 			return
+		}
+
+		// --- Deception: injection-canary scan of the reply ---
+		// A planted canary marker appearing in the agent's own answer means it
+		// obeyed injected content and is now leaking it to the user. This is
+		// the reply-side counterpart to the inline tool-call canary check. Only
+		// the content dimension is populated, so this trips only on a canary.
+		if cfg.Deception != nil {
+			if dRes := cfg.Deception.Check(deception.Input{Content: body.Reply}); dRes.Tripped {
+				agent := agentID
+				if agent == "" {
+					agent = "unattributed agent"
+				}
+				if dRes.Contain {
+					if agentID != "" && cfg.KillSwitch != nil {
+						_ = cfg.KillSwitch.Engage(r.Context(), killswitch.Entry{
+							Type:   killswitch.ScopeAgent,
+							Tenant: tenant,
+							Value:  agentID,
+							Reason: dRes.Reason,
+							SetAt:  time.Now().UTC(),
+						})
+					}
+					if tokenID != "" && cfg.Revocation != nil {
+						_ = cfg.Revocation.Revoke(r.Context(), tokenID, dRes.Reason, tenant)
+					}
+				}
+				if cfg.DeceptionReporter != nil {
+					go cfg.DeceptionReporter.Report(context.Background(), deception.Trip{
+						DecoyID:     dRes.Decoy.ID,
+						DecoyName:   dRes.Decoy.Name,
+						Pillar:      dRes.Decoy.Pillar,
+						Agent:       agent,
+						Severity:    string(dRes.Severity),
+						ActionTaken: string(dRes.Action),
+						Detail:      dRes.Reason,
+					})
+				}
+				emitReplyAudit(cfg, r, audit.DecisionBlock, tenant, agentID,
+					"reply blocked (deception canary: "+dRes.Reason+")")
+				cfg.Logger.Warn("reply blocked by deception canary",
+					"tenant", tenant, "agent", agentID, "decoy", dRes.Decoy.Name, "reason", dRes.Reason)
+				_ = json.NewEncoder(w).Encode(replyResponse{Action: "block", Reply: ""})
+				return
+			}
 		}
 
 		// --- Content inspection ---
