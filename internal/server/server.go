@@ -419,6 +419,10 @@ func New(cfg Config) *http.Server {
 			// hint instead of the editor.
 			mux.Handle("POST /v1/admin/policies/dry-run", handlers.NewAdminPoliciesDryRunHandler(adminCfg))
 		}
+		// Effect preview: read-only "look before you leap" projection of a
+		// candidate tool call's blast radius. Always available with an admin
+		// token; never executes the call.
+		mux.Handle("POST /v1/admin/preview", handlers.NewAdminEffectPreviewHandler(adminCfg))
 		// Integrations endpoint always registered when an admin token
 		// is set: returns an empty array when no SIEM is wired, which
 		// the console renders as "no integrations configured" rather
