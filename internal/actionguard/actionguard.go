@@ -56,6 +56,9 @@ type Config struct {
 	// BlockUnboundedDelete: an unbounded (no-filter / wildcard / "all")
 	// delete is blocked outright.
 	BlockUnboundedDelete bool
+	// Feed is an optional threat-intel feed of known-bad indicators, evaluated
+	// before the mandatory-hold and plan-level rules. nil disables it.
+	Feed *ThreatFeed
 }
 
 // DefaultConfig is a sensible starting point: hold irreversible actions over
@@ -68,6 +71,7 @@ func DefaultConfig() Config {
 // concurrent use.
 type Guard struct {
 	cfg      Config
+	feed     *ThreatFeed
 	mu       sync.Mutex
 	sessions map[string]*session
 }
@@ -83,7 +87,7 @@ type session struct {
 
 // New returns a Guard with the given config.
 func New(cfg Config) *Guard {
-	return &Guard{cfg: cfg, sessions: make(map[string]*session)}
+	return &Guard{cfg: cfg, feed: cfg.Feed, sessions: make(map[string]*session)}
 }
 
 var reSpace = regexp.MustCompile(`\s+`)
@@ -104,6 +108,16 @@ func (g *Guard) Check(sessionID, tool string, args map[string]any) Result {
 	if s == nil {
 		s = &session{created: make(map[string]bool)}
 		g.sessions[sessionID] = s
+	}
+
+	// Rule 0 (threat-intel feed): known-bad destination, tool, or sequence.
+	// Evaluated first so a fresh indicator catches an attack the other rules
+	// would let through.
+	if g.feed != nil {
+		if v, reason, rule, hit := g.feed.match(tool, ir, s.history); hit {
+			g.record(s, ir, args)
+			return Result{v, reason, rule, ir}
+		}
 	}
 
 	// Rule 1 (mandatory hold): unbounded destructive action is blocked.

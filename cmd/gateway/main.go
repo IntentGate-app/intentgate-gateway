@@ -264,6 +264,16 @@ func main() {
 	refVerifyConfigPath := envOr("INTENTGATE_REFVERIFY_CONFIG_PATH", "")
 	refVerifyMinCentsRaw := envOr("INTENTGATE_REFVERIFY_MIN_CENTS", "0")
 	refVerifyFailClosed := envOr("INTENTGATE_REFVERIFY_FAIL_CLOSED", "true") != "false"
+	// Live system-of-record connector (takes precedence over the static config
+	// file when set). Point INTENTGATE_REFVERIFY_SOR_URL at an SAP Gateway
+	// OData service or any REST vendor/HR/CRM system of record. Optional auth
+	// header and payee query-param name; see internal/refverify.HTTPVendorMaster.
+	refVerifySORURL := envOr("INTENTGATE_REFVERIFY_SOR_URL", "")
+	refVerifySORParam := envOr("INTENTGATE_REFVERIFY_SOR_PARAM", "payee")
+	refVerifySORAuthHeader := envOr("INTENTGATE_REFVERIFY_SOR_AUTH_HEADER", "")
+	refVerifySORAuthValue := envOr("INTENTGATE_REFVERIFY_SOR_AUTH_VALUE", "")
+	refVerifySORTimeoutMs := envOr("INTENTGATE_REFVERIFY_SOR_TIMEOUT_MS", "5000")
+	refVerifySORCacheTTLMs := envOr("INTENTGATE_REFVERIFY_SOR_CACHE_TTL_MS", "30000")
 	// East-west (agent-to-agent) authorization. Off by default. When enabled,
 	// a call to a tool named "<prefix><agent-id>" is treated as an agent-to-
 	// agent call and evaluated against a zone model with default-deny. The
@@ -489,13 +499,26 @@ func main() {
 			logger.Error("invalid INTENTGATE_ACTION_GUARD_ESCALATE_OVER_CENTS", "err", err)
 			os.Exit(1)
 		}
+		// Optional threat-intel feed of known-bad indicators, loaded from
+		// INTENTGATE_ACTION_GUARD_THREATFEED_PATH. Failure to load is fatal so a
+		// misconfigured feed never silently disables the control.
+		var threatFeed *actionguard.ThreatFeed
+		if p := envOr("INTENTGATE_ACTION_GUARD_THREATFEED_PATH", ""); p != "" {
+			threatFeed, err = actionguard.LoadThreatFeedFile(p)
+			if err != nil {
+				logger.Error("cannot load INTENTGATE_ACTION_GUARD_THREATFEED_PATH", "path", p, "err", err)
+				os.Exit(1)
+			}
+		}
 		actionGuard = actionguard.New(actionguard.Config{
 			EscalateOverCents:    escalateOverCents,
 			BlockUnboundedDelete: actionGuardBlockUnboundedDelete,
+			Feed:                 threatFeed,
 		})
 		logger.Info("action guard enabled",
 			"escalate_over_cents", escalateOverCents,
 			"block_unbounded_delete", actionGuardBlockUnboundedDelete,
+			"threat_feed_loaded", threatFeed != nil,
 		)
 	} else {
 		logger.Info("action guard not configured (set INTENTGATE_ACTION_GUARD_ENABLED=true to enable)")
@@ -509,7 +532,32 @@ func main() {
 			os.Exit(1)
 		}
 		var master refverify.VendorMaster
-		if refVerifyConfigPath != "" {
+		masterSource := "none"
+		if refVerifySORURL != "" {
+			// Live system-of-record connector takes precedence.
+			timeoutMs, err := strconv.ParseInt(refVerifySORTimeoutMs, 10, 64)
+			if err != nil {
+				logger.Error("invalid INTENTGATE_REFVERIFY_SOR_TIMEOUT_MS", "err", err)
+				os.Exit(1)
+			}
+			cacheTTLMs, err := strconv.ParseInt(refVerifySORCacheTTLMs, 10, 64)
+			if err != nil {
+				logger.Error("invalid INTENTGATE_REFVERIFY_SOR_CACHE_TTL_MS", "err", err)
+				os.Exit(1)
+			}
+			headers := map[string]string{}
+			if refVerifySORAuthHeader != "" && refVerifySORAuthValue != "" {
+				headers[refVerifySORAuthHeader] = refVerifySORAuthValue
+			}
+			master = refverify.NewHTTPVendorMaster(refverify.HTTPConfig{
+				Endpoint: refVerifySORURL,
+				Param:    refVerifySORParam,
+				Headers:  headers,
+				Timeout:  time.Duration(timeoutMs) * time.Millisecond,
+				CacheTTL: time.Duration(cacheTTLMs) * time.Millisecond,
+			})
+			masterSource = "http_system_of_record"
+		} else if refVerifyConfigPath != "" {
 			records, err := refverify.LoadConfigFile(refVerifyConfigPath)
 			if err != nil {
 				// Fail-closed: keep the verifier enabled with a nil master so
@@ -519,6 +567,7 @@ func main() {
 					"path", refVerifyConfigPath, "err", err)
 			} else {
 				master = refverify.NewStaticVendorMaster(records)
+				masterSource = "static_config_file"
 			}
 		}
 		refVerify = refverify.New(refverify.Config{
@@ -527,6 +576,8 @@ func main() {
 			FailClosed: refVerifyFailClosed,
 		})
 		logger.Info("reference verification enabled",
+			"master_source", masterSource,
+			"sor_url", refVerifySORURL,
 			"config_path", refVerifyConfigPath,
 			"min_cents", refVerifyMinCents,
 			"fail_closed", refVerifyFailClosed,
