@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.29
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.105.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/open-policy-agent/opa v1.18.2
 	github.com/prometheus/client_golang v1.23.2
