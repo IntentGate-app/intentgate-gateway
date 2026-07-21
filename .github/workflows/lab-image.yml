@@ -1,0 +1,110 @@
+# Publishes the image the lab runs.
+#
+# Deliberately separate from release.yml. That workflow publishes semver tags
+# and `latest`, which are promises to anyone consuming the product; this one
+# publishes a mutable `main` tag plus an immutable per-commit tag, which is a
+# promise to nobody except our own demo box. Mixing them would mean a routine
+# push to main could produce something that looks like a release.
+#
+# Why images at all: the lab used to build from source on the box, which meant
+# the only way to know what was deployed was to remember what was last copied
+# there. An image digest is a fact that traces to a commit, which is the
+# question that actually gets asked after an incident.
+name: Lab image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+# One build at a time per branch, and cancel a superseded one. Two pushes in
+# quick succession should not race to decide which image `main` points at.
+concurrency:
+  group: lab-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Build and push the lab image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # `main` is what the lab tracks. The sha tag is what an incident
+          # review needs: it never moves, so "which build was enforcing on
+          # Tuesday" has an answer.
+          tags: |
+            type=raw,value=main
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=intentgate-gateway
+            org.opencontainers.image.description=Self-hosted authorization gateway for AI agents
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # amd64 only. The lab is a single x86 EC2 box, and the arm64 leg
+          # roughly doubles build time under QEMU for an artefact nothing
+          # here runs. Release builds stay multi-arch.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=main-${{ github.sha }}
+          provenance: true
+          sbom: true
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "## Lab image published"
+            echo
+            echo "Deploy on the lab box with:"
+            echo
+            echo '```'
+            echo "cd ~/IntentGate/lab && docker compose --profile deploy pull && docker compose --profile deploy up -d"
+            echo '```'
+            echo
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
