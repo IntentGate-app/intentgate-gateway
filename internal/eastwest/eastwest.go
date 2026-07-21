@@ -346,6 +346,11 @@ func (g *Guard) Snapshot() Config {
 	out := Config{
 		AgentToolPrefix: st.cfg.AgentToolPrefix,
 		AllowIntraZone:  st.cfg.AllowIntraZone,
+		// ObserveOnly has to survive the snapshot or every read-back reports
+		// the estate as enforcing. A console that shows a verdict while the
+		// gateway is only observing is telling the operator their agents are
+		// contained when nothing is being stopped.
+		ObserveOnly: st.cfg.ObserveOnly,
 	}
 	if st.cfg.Zones != nil {
 		out.Zones = make(map[string]string, len(st.cfg.Zones))
@@ -360,6 +365,15 @@ func (g *Guard) Snapshot() Config {
 	if st.cfg.AllowedPairs != nil {
 		out.AllowedPairs = make([][2]string, len(st.cfg.AllowedPairs))
 		copy(out.AllowedPairs, st.cfg.AllowedPairs)
+	}
+	// Rules carry the governance record: purpose, owner, approval, expiry. A
+	// snapshot that omitted them would hand the console a config it could save
+	// straight back, erasing every justification in the estate and leaving the
+	// bare pair behind. The rule would still authorize, so nothing would look
+	// broken; the audit trail would simply be gone.
+	if st.cfg.Rules != nil {
+		out.Rules = make([]Rule, len(st.cfg.Rules))
+		copy(out.Rules, st.cfg.Rules)
 	}
 	return out
 }

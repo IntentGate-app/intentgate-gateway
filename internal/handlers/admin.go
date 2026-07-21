@@ -1049,6 +1049,36 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			return
 		}
 
+		// A field the client did not send is not a field the client cleared.
+		//
+		// This distinction is the whole safety property of this endpoint. The
+		// config is written as one document, so a client that sends a partial
+		// body and gets it written verbatim destroys everything it did not
+		// mention. That is not hypothetical: the console's Agent Groups page
+		// edits labels and tool scope and has no reason to send agent-to-agent
+		// rules, so every save from that page erased every authorization in the
+		// estate. Nothing errored. The rules were simply gone, and the only
+		// symptom was a page reporting zero.
+		//
+		// JSON tells the two cases apart for us: an absent or null field
+		// decodes to a nil slice, an explicit [] to an empty non-nil one. So
+		// "leave this alone" and "clear this" stay expressible, and the
+		// dangerous one is no longer the default.
+		if cfg.EastWest != nil {
+			live := cfg.EastWest.Snapshot()
+			if body.EastWest.AllowedPairs == nil {
+				body.EastWest.AllowedPairs = live.AllowedPairs
+			}
+			if body.EastWest.AllowedEdges == nil {
+				body.EastWest.AllowedEdges = live.AllowedEdges
+				body.EastWest.AllowedGroupCalls = live.AllowedEdges
+			}
+			if body.EastWest.Groups == nil {
+				body.EastWest.Groups = live.Zones
+				body.EastWest.Zones = live.Zones
+			}
+		}
+
 		wrote := []string{}
 		if cfg.EastWestConfigPath != "" {
 			prefix := body.EastWest.AgentToolPrefix
