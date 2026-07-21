@@ -103,7 +103,32 @@ CREATE TABLE IF NOT EXISTS audit_events (
     -- Empty / FALSE for non-approval-flow events.
     pending_id               TEXT NOT NULL DEFAULT '',
     decided_by               TEXT NOT NULL DEFAULT '',
-    requires_step_up         BOOLEAN NOT NULL DEFAULT FALSE
+    requires_step_up         BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Response observability (gateway 1.9+).
+    --
+    -- Unlike the approval columns above, these four are deliberately NOT
+    -- part of audit.canonicalEvent and so do not contribute to the chain
+    -- hash. That is what lets them be added to a deployment with an
+    -- existing chain without invalidating it: an old row re-canonicalised
+    -- today produces the same bytes it did when it was written.
+    --
+    --   event_id       gateway-generated id, the join key to
+    --                  agent_call_payloads. Empty on rows written before
+    --                  this feature, which is how the console knows not to
+    --                  offer a drill-down that cannot resolve.
+    --   result_sha256  hash of the RAW upstream response. Present whenever
+    --                  capture was on for the tool, even if the store
+    --                  write then failed.
+    --   result_bytes   size of that raw response.
+    --   result_stored  a redacted copy was retained and is fetchable.
+    --                  FALSE with a non-empty result_sha256 means the
+    --                  response was hashed but not kept - the honest state
+    --                  the console must render rather than a dead link.
+    event_id                 TEXT NOT NULL DEFAULT '',
+    result_sha256            TEXT NOT NULL DEFAULT '',
+    result_bytes             INTEGER NOT NULL DEFAULT 0,
+    result_stored            BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Idempotent ALTERs: existing 0.5/0.6 deployments whose audit_events
@@ -129,6 +154,20 @@ ALTER TABLE audit_events
     ADD COLUMN IF NOT EXISTS decided_by TEXT NOT NULL DEFAULT '';
 ALTER TABLE audit_events
     ADD COLUMN IF NOT EXISTS requires_step_up BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE audit_events
+    ADD COLUMN IF NOT EXISTS event_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_events
+    ADD COLUMN IF NOT EXISTS result_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_events
+    ADD COLUMN IF NOT EXISTS result_bytes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE audit_events
+    ADD COLUMN IF NOT EXISTS result_stored BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Resolve a captured payload back to the decision that produced it.
+-- Partial: only rows from a capture-enabled gateway carry an event_id.
+CREATE INDEX IF NOT EXISTS audit_events_event_id_idx
+    ON audit_events (event_id)
+    WHERE event_id <> '';
 
 -- Compliance lookup: "every event during elevation X". Partial
 -- index so non-elevated rows (the vast majority) don't bloat it.

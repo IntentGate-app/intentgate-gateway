@@ -204,7 +204,8 @@ func (s *PostgresStore) Insert(ctx context.Context, e audit.Event) error {
 			arg_values,
 			prev_hash, hash,
 			elevation_id,
-			pending_id, decided_by, requires_step_up
+			pending_id, decided_by, requires_step_up,
+			event_id, result_sha256, result_bytes, result_stored
 		) VALUES (
 			$1, $2, $3,
 			$4, $5, $6,
@@ -216,7 +217,8 @@ func (s *PostgresStore) Insert(ctx context.Context, e audit.Event) error {
 			$19,
 			$20, $21,
 			$22,
-			$23, $24, $25
+			$23, $24, $25,
+			$26, $27, $28, $29
 		)
 		RETURNING id
 	`
@@ -234,6 +236,7 @@ func (s *PostgresStore) Insert(ctx context.Context, e audit.Event) error {
 		prevHashCol, newHash,
 		nullableString(e.ElevationID),
 		e.PendingID, e.DecidedBy, e.RequiresStepUp,
+		e.EventID, e.ResultSHA256, e.ResultBytes, e.ResultStored,
 	).Scan(&insertedID); err != nil {
 		return fmt.Errorf("auditstore: insert: %w", err)
 	}
@@ -294,7 +297,8 @@ func (s *PostgresStore) Query(ctx context.Context, f QueryFilter) ([]audit.Event
 			capability_token_id, intent_summary,
 			latency_ms, remote_ip, upstream_status,
 			root_capability_token_id, caveat_count, tenant,
-			arg_values, elevation_id
+			arg_values, elevation_id,
+			event_id, result_sha256, result_bytes, result_stored
 		FROM audit_events
 	` + where + `
 		ORDER BY ts DESC
@@ -330,6 +334,7 @@ func (s *PostgresStore) Query(ctx context.Context, f QueryFilter) ([]audit.Event
 			&ev.LatencyMS, &ev.RemoteIP, &ev.UpstreamStatus,
 			&rootJTI, &caveatCount, &tenant,
 			&argValuesJSON, &elevationID,
+			&ev.EventID, &ev.ResultSHA256, &ev.ResultBytes, &ev.ResultStored,
 		); err != nil {
 			return nil, fmt.Errorf("auditstore: scan: %w", err)
 		}
