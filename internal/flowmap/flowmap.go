@@ -14,7 +14,10 @@
 // events; this package never touches a store.
 package flowmap
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Call is one observed gateway call, the minimal shape the extractor needs.
 // The wiring layer maps an audit event onto this.
@@ -119,6 +122,9 @@ func (c Config) agentTarget(tool string) (callee string, isAgent bool) {
 // edges come back sorted, and decision counts aggregate per directed edge.
 // Calls with an empty Agent or Tool, or an east-west call with a bare prefix,
 // are skipped.
+// adminToolPrefix marks the gateway's own admin endpoints in the audit stream.
+const adminToolPrefix = "admin/"
+
 func Extract(cfg Config, calls []Call) Graph {
 	kinds := map[string]NodeKind{}
 	setAgent := func(id string) {
@@ -138,6 +144,19 @@ func Extract(cfg Config, calls []Call) Graph {
 
 	for _, c := range calls {
 		if c.Agent == "" || c.Tool == "" {
+			continue
+		}
+		// Administrative operations are not agent traffic.
+		//
+		// admin/mint, admin/promote_policy and the rest are things an OPERATOR
+		// did through the admin API. They carry an agent_id because the token
+		// being minted names an agent, not because that agent called anything.
+		// Left in, they appear on the estate map as tools agents reach, which
+		// inflates the tool inventory and lets the policy overlay claim group
+		// scope would deny an agent access to an endpoint it never calls.
+		//
+		// They remain in the audit log, which is where operator actions belong.
+		if strings.HasPrefix(c.Tool, adminToolPrefix) {
 			continue
 		}
 		to := c.Tool
