@@ -21,6 +21,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
+	"github.com/IntentGate-app/intentgate-gateway/internal/payloads"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policystore"
@@ -168,6 +169,14 @@ type Config struct {
 	// unchanged. Constructed at startup from INTENTGATE_OUTPUT_SCHEMAS_PATH.
 	// See internal/outputschema.
 	OutputSchemas *outputschema.Registry
+
+	// Payloads retains what agents received back, when PayloadPolicy selects
+	// the call. Nil disables capture entirely, whatever the policy says, so a
+	// deployment with no store cannot believe it is recording responses.
+	Payloads payloads.Store
+	// PayloadPolicy decides which calls are captured. Zero value captures
+	// nothing.
+	PayloadPolicy payloads.Policy
 	// TenantScope is the optional LLM08 per-tenant vector-scope
 	// enforcer. nil disables the check; the gateway behaves
 	// unchanged. Constructed at startup from INTENTGATE_TENANT_SCOPED_TOOLS.
@@ -287,6 +296,8 @@ func New(cfg Config) *http.Server {
 		ProvenanceEnabled: cfg.ProvenanceEnabled,
 		PIIFilter:         cfg.PIIFilter,
 		OutputSchemas:     cfg.OutputSchemas,
+		Payloads:          cfg.Payloads,
+		PayloadPolicy:     cfg.PayloadPolicy,
 		TenantScope:       cfg.TenantScope,
 		FaultIsolation:    cfg.FaultIsolation,
 		ActionGuard:       cfg.ActionGuard,

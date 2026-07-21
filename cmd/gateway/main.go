@@ -734,6 +734,17 @@ func main() {
 		auditDesc = auditDesc + "+" + auditStoreDesc
 	}
 
+	// Response capture. Off unless explicitly configured; a nil store keeps
+	// the handler's capture path inert whatever the policy says.
+	payloadStore, payloadPolicy, err := loadPayloadCapture(
+		context.Background(), logger, postgresURL,
+	)
+	if err != nil {
+		logger.Error("failed to initialize response capture", "err", err)
+		os.Exit(1)
+	}
+	startPayloadPurge(context.Background(), logger, payloadStore)
+
 	siemEmitters, siemReporters, siemDesc, err := loadSIEM(logger, siemEnv{
 		splunkURL:            splunkURL,
 		splunkToken:          splunkToken,
@@ -1059,6 +1070,8 @@ func main() {
 		ProvenanceEnabled:     provenanceEnabled,
 		PIIFilter:             piiFilter,
 		OutputSchemas:         outputSchemas,
+		Payloads:              payloadStore,
+		PayloadPolicy:         payloadPolicy,
 		TenantScope:           tenantScopeEnforcer,
 		FaultIsolation:        faultIsolator,
 		ActionGuard:           actionGuard,

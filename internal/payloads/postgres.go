@@ -24,7 +24,8 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgres applies the migration and returns the store.
+// NewPostgres applies the migration and returns the store, using a pool the
+// caller already owns.
 func NewPostgres(ctx context.Context, pool *pgxpool.Pool) (*PostgresStore, error) {
 	if pool == nil {
 		return nil, errors.New("payloads: nil pool")
@@ -33,6 +34,40 @@ func NewPostgres(ctx context.Context, pool *pgxpool.Pool) (*PostgresStore, error
 		return nil, fmt.Errorf("payloads: migrate: %w", err)
 	}
 	return &PostgresStore{pool: pool}, nil
+}
+
+// NewPostgresFromDSN opens its own pool. Mirrors auditstore, which also owns
+// its pool privately rather than sharing one across packages: a shared pool
+// would mean payload writes and audit writes compete for the same connections,
+// and payload capture is the one that must never slow the decision path.
+//
+// The pool is deliberately small. Capture is a side effect of a request that
+// has already been decided, so it should not be able to starve anything else
+// of connections under load.
+func NewPostgresFromDSN(ctx context.Context, dsn string) (*PostgresStore, error) {
+	if dsn == "" {
+		return nil, errors.New("payloads: postgres DSN is required")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("payloads: parse DSN: %w", err)
+	}
+	if cfg.MaxConns == 0 {
+		cfg.MaxConns = 5
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("payloads: connect: %w", err)
+	}
+	return NewPostgres(ctx, pool)
+}
+
+// Close releases the pool. Only meaningful for a store built by
+// NewPostgresFromDSN; harmless otherwise.
+func (p *PostgresStore) Close() {
+	if p != nil && p.pool != nil {
+		p.pool.Close()
+	}
 }
 
 func (p *PostgresStore) Put(ctx context.Context, rec Record) error {
