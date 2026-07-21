@@ -161,6 +161,39 @@ type Event struct {
 	// filter on this field to scope a query.
 	Tenant string `json:"tenant,omitempty"`
 
+	// EventID is a gateway-generated id, stamped at emit time. The audit
+	// store also assigns a sequence number, but that is allocated on insert
+	// and the handler never sees it, so it cannot be used to correlate an
+	// event with anything produced while handling the call.
+	//
+	// Its purpose is joining a decision to the response it produced: the
+	// captured payload (internal/payloads) is keyed by this value.
+	//
+	// Deliberately NOT part of the canonical hash. See ResultSHA256 below for
+	// why, and note the same caveat applies here.
+	EventID string `json:"event_id,omitempty"`
+
+	// ResultSHA256 is the hex SHA-256 of the response the upstream returned,
+	// hashed BEFORE redaction. Present only when payload capture is on for
+	// this tool. It is what lets an operator prove which response the agent
+	// received without the body itself living in the audit stream.
+	//
+	// NOT part of the canonical hash, for the same reason arg_values is
+	// excluded: the canonical form is an explicit struct mirror, and adding a
+	// field to it would change the canonical bytes of every event already
+	// written, breaking verification of existing chains. Making the response
+	// hash tamper-evident requires a chain-version bump, which is a separate
+	// and deliberate change.
+	ResultSHA256 string `json:"result_sha256,omitempty"`
+	// ResultBytes is the size of that raw response. Safe to hash-exclude and
+	// safe to keep: a size is not customer data, and "this returned 40MB" is
+	// often the whole finding.
+	ResultBytes int `json:"result_bytes,omitempty"`
+	// ResultStored says a redacted copy was retained and can be fetched.
+	// False with a non-empty ResultSHA256 means the response was hashed but
+	// the body was not kept, which is a legitimate posture on its own.
+	ResultStored bool `json:"result_stored,omitempty"`
+
 	// Actor (the AI agent making the call).
 	AgentID   string `json:"agent_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
