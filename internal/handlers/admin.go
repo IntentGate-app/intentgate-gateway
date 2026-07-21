@@ -2186,6 +2186,11 @@ func NewAdminPoliciesDryRunHandler(cfg AdminConfig) http.Handler {
 			Tool       string `json:"tool,omitempty"`
 			MaxSamples int    `json:"max_samples,omitempty"`
 			Tenant     string `json:"tenant,omitempty"`
+			// The currently-live policy, sent so the safety check can
+			// spot a change that removes a protection the live policy
+			// has. Optional: absent just skips the one static check that
+			// needs it; every traffic-based check still runs.
+			CurrentRego string `json:"current_rego,omitempty"`
 		}
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20)) // 1 MiB cap on body
 		if err := dec.Decode(&body); err != nil {
@@ -2297,15 +2302,24 @@ func NewAdminPoliciesDryRunHandler(cfg AdminConfig) http.Handler {
 		// Attach the input window to the response so the UI can render
 		// "evaluated against N events between X and Y" without round-
 		// tripping the request body.
+		// The deterministic safety check, run over the same result the
+		// operator is about to read. It never fails the request: a bad
+		// policy never reached here (DryRun rejected it), and every
+		// check degrades to saying less rather than erroring.
+		safety := policy.Analyze(
+			body.CurrentRego, body.Rego, result.Summary, policy.DefaultThresholds(),
+		)
+
 		resp := struct {
 			policy.DryRunResult
-			Window struct {
+			SafetyCheck policy.Report `json:"safety_check"`
+			Window      struct {
 				From   string `json:"from,omitempty"`
 				To     string `json:"to,omitempty"`
 				Tenant string `json:"tenant,omitempty"`
 				Limit  int    `json:"limit"`
 			} `json:"window"`
-		}{DryRunResult: result}
+		}{DryRunResult: result, SafetyCheck: safety}
 		resp.Window.From = body.From
 		resp.Window.To = body.To
 		resp.Window.Tenant = tenant
