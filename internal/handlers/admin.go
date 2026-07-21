@@ -24,6 +24,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/flowmap"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
+	"github.com/IntentGate-app/intentgate-gateway/internal/payloads"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/provenance"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
@@ -74,6 +75,12 @@ type AdminConfig struct {
 	// integrations list rather than a 404 — the console renders that
 	// as "no integrations configured" guidance.
 	SIEMReporters []siem.StatusReporter
+	// Payloads is the retained-response store read by
+	// /v1/admin/payloads/{event_id}. nil disables that route: with no store
+	// there is nothing to read, and a registered endpoint that always 404s
+	// would suggest capture is on when it is not.
+	Payloads payloads.Store
+
 	// Approvals is the queue the /v1/admin/approvals endpoints read
 	// from. nil disables those routes (they're not registered).
 	Approvals approvals.Store

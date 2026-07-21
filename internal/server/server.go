@@ -443,6 +443,14 @@ func New(cfg Config) *http.Server {
 		// Approvals endpoints register only when a queue is wired.
 		// Older / lighter deployments without escalation get a 404,
 		// which the console renders as "feature not enabled".
+		// Retained-response reads. Registered only when a payload store is
+		// wired: an endpoint that always 404s would imply capture exists when
+		// it does not, and this is the one surface where that confusion is
+		// expensive.
+		if cfg.Payloads != nil {
+			adminCfg.Payloads = cfg.Payloads
+			mux.Handle("GET /v1/admin/payloads/{event_id}", handlers.NewAdminPayloadHandler(adminCfg))
+		}
 		if cfg.Approvals != nil {
 			adminCfg.Approvals = cfg.Approvals
 			mux.Handle("GET /v1/admin/approvals", handlers.NewAdminApprovalsListHandler(adminCfg))
