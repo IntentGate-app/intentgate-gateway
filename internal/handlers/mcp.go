@@ -603,11 +603,34 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 		eastWestCall = ewRes.EastWest
 		if ewRes.EastWest {
 			h.cfg.Metrics.ObserveCheck("eastwest", string(ewRes.Verdict), time.Since(ewStart))
+			// Observe mode let this through. The call is not blocked, but the
+			// operator has to be able to find every one of these later: this
+			// is the list that becomes the ruleset when they switch
+			// enforcement on, and each line is a path that will break if it
+			// is not covered by then.
+			if ewRes.WouldDeny {
+				h.cfg.Logger.Warn("east-west would be denied (observe mode, call allowed)",
+					"caller", capResult.agentID, "callee", ewRes.CalleeAgent,
+					"caller_zone", ewRes.CallerZone, "callee_zone", ewRes.CalleeZone,
+					"reason", ewRes.Reason,
+					"hint", "add a rule for this pair before enforcing, or it will break")
+			}
 			if ewRes.Verdict == eastwest.VerdictDeny {
+				// A callee that is in no zone is a configuration gap, not a
+				// policy decision: every call to that agent will be denied
+				// and nothing else says why. Warn so it is visible in the
+				// operator's logs rather than reading as ordinary default-deny.
+				if ewRes.CalleeUnzoned {
+					h.cfg.Logger.Warn("east-west callee has no zone assignment",
+						"callee", ewRes.CalleeAgent, "caller", capResult.agentID,
+						"caller_zone", ewRes.CallerZone,
+						"hint", "add this agent to the east-west zones directory; until then every call to it is denied")
+				}
 				h.cfg.Logger.Info("mcp tools/call blocked",
 					"tool", params.Name, "check", "eastwest", "agent", capResult.agentID,
 					"callee", ewRes.CalleeAgent, "caller_zone", ewRes.CallerZone,
-					"callee_zone", ewRes.CalleeZone, "reason", ewRes.Reason)
+					"callee_zone", ewRes.CalleeZone, "callee_unzoned", ewRes.CalleeUnzoned,
+					"reason", ewRes.Reason)
 				h.emitAudit(ctx, r, params, capResult, intResult,
 					audit.DecisionBlock, audit.CheckEastWest,
 					fmt.Sprintf("east-west denied: %s", ewRes.Reason), start, 0)

@@ -10,12 +10,21 @@
 // point as every other call. A tool named "<prefix><agent-id>" (for example
 // "agent:finance") is treated as a call to that agent.
 //
-// Decision: a zone model plus default-deny. Each agent belongs to a zone. An
-// agent may call another agent only when an explicit edge permits the path
-// from the caller's zone to the callee's zone, or when both are in the same
-// zone and intra-zone calls are allowed. Anything else is denied. This is the
-// containment control: it keeps a compromised agent from recruiting agents in
-// other zones.
+// Decision: per agent pair, plus default-deny. The unit of control is one
+// named caller calling one named callee. A rule may name the two agents
+// directly (AllowedPairs), which is the primary form, and either side may be a
+// trailing-* pattern so a fleet can be written without listing every member.
+//
+// Labels (the Zones map and AllowedEdges) are an authoring convenience layered
+// on top: at 500 agents there are 250,000 ordered pairs and nobody can write
+// them by hand, so a label lets one rule stand for many pairs. A label is never
+// a statement about reachability. Two agents carrying the same label have no
+// path between them unless a rule grants it, which is why AllowIntraZone is
+// deprecated: it is the one setting that granted reachability by membership.
+//
+// This is the containment control: a compromised agent cannot recruit another
+// agent unless someone wrote a rule naming that exact pair, directly or through
+// a pattern.
 //
 // Deterministic and config-driven. A call that is NOT an agent-to-agent call
 // is a no-op here and passes straight through, so wiring this in front of the
@@ -44,20 +53,64 @@ type Config struct {
 	// "agent:finance" with prefix "agent:". Empty disables detection, so
 	// every call is treated as north-south and this guard is a no-op.
 	AgentToolPrefix string
-	// Zones maps an agent id to its zone id. An agent with no entry is in
-	// the empty zone "", which can only reach what an explicit edge allows.
+	// AllowedPairs lists permitted calls as [callerAgent, calleeAgent]. This
+	// is the primary rule form: the decision is about these two agents and
+	// nothing else. Either side may be an exact agent id, or a pattern with a
+	// trailing "*" ("agent-procure-*"), or "*" for any agent. Direction
+	// matters: [a, b] lets a call b, never the reverse.
+	//
+	// Nothing is implied. Listing agents under the same label does not put a
+	// pair here; only a rule does.
+	AllowedPairs [][2]string
+	// Zones maps an agent id to a label. Labels exist so one rule can stand
+	// for many agent pairs when authoring at scale. Membership grants nothing
+	// on its own.
 	Zones map[string]string
-	// AllowedEdges lists permitted directions as [callerZone, calleeZone].
-	// The direction matters: [a, b] permits a to call into b, not the
-	// reverse.
+	// AllowedEdges lists permitted directions between labels as
+	// [callerLabel, calleeLabel]. Each entry expands to the pairs of agents
+	// carrying those labels. Direction matters.
 	AllowedEdges [][2]string
-	// AllowIntraZone permits agents in the same non-empty zone to call each
-	// other without needing an explicit edge.
+	// AllowIntraZone permits agents sharing a label to call each other with no
+	// rule naming them.
+	//
+	// ObserveOnly reports what the ruleset would decide without enforcing it:
+	// a call that has no rule is allowed through, and the result carries
+	// WouldDeny so the audit records it as "this would have been blocked".
+	//
+	// This exists to solve a real ordering problem. The recommender derives
+	// rules from allowed traffic, so an estate that starts correctly (deny by
+	// default, no rules) produces no allowed traffic, and therefore no
+	// recommendation: there is no safe way in. Observe mode gives an operator a
+	// window where nothing breaks, every path the agents genuinely need is
+	// recorded, and the ruleset can then be adopted and enforced in one click.
+	//
+	// It is not a safe resting state. Anything is reachable while it is on, so
+	// the gateway warns at startup and the console surfaces it prominently.
+	ObserveOnly bool
+	// Deprecated: this grants reachability by group membership, which is the
+	// property this package exists to remove. Write the pairs you want, using
+	// a pattern if the fleet is large. Retained so existing configs keep
+	// loading; it is evaluated last and reported as such.
 	AllowIntraZone bool
 }
 
 // Result is the guard's decision plus the resolved zones, for audit.
 type Result struct {
+	// CalleeUnzoned is true when the callee is not in the Zones directory at
+	// all. Such a call is denied, but the cause is a configuration gap (an
+	// agent nobody mapped to a zone), not a policy decision. Callers surface
+	// it distinctly so an operator is not left reading "default-deny" while
+	// the real problem is a missing directory entry.
+	CalleeUnzoned bool
+	// WouldDeny is true when observe mode let a call through that the rules
+	// would otherwise have refused. The verdict is Allow, so the call is not
+	// blocked, but this is the signal that the estate is not yet enforcing.
+	WouldDeny bool
+	// DecidedBy names which kind of rule produced the verdict, so an audit
+	// record can distinguish "someone authorised these two agents" from
+	// "these two agents happen to share a label". Empty for pass-through.
+	// One of: "agent-rule", "label-rule", "shared-label", "default-deny".
+	DecidedBy   string
 	Verdict     Verdict
 	Reason      string
 	CallerAgent string
@@ -70,29 +123,109 @@ type Result struct {
 	EastWest bool
 }
 
-// Guard evaluates east-west calls against the configured zones and edges.
-// Safe for concurrent use.
+// Guard evaluates east-west calls against the configured rules.
+// Safe for concurrent use, and safe to update while serving traffic.
 type Guard struct {
-	cfg   Config
-	mu    sync.RWMutex
-	edges map[string]bool
+	mu sync.RWMutex
+	// st is swapped wholesale on update. Readers take a pointer under the
+	// read lock and then work on it without holding anything, so a rule
+	// change never blocks in-flight authorization and a single call can
+	// never see half of an old ruleset and half of a new one.
+	st *state
 }
+
+// state is one immutable compiled ruleset.
+type state struct {
+	cfg   Config
+	edges map[string]bool
+	// Exact agent pairs, for an O(1) hit on the common case.
+	pairs map[string]bool
+	// Pairs where at least one side is a pattern. Kept as a slice because it
+	// has to be scanned; in practice it is short (one entry per fleet rule).
+	globs []pairRule
+}
+
+type pairRule struct{ from, to string }
 
 const sep = "\x00"
 
-// New returns a Guard for the given config.
-func New(cfg Config) *Guard {
+// matches reports whether pattern accepts agent. A pattern is either an exact
+// id, or a prefix ending in "*". "*" alone accepts any agent.
+func matches(pattern, agent string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(agent, strings.TrimSuffix(pattern, "*"))
+	}
+	return pattern == agent
+}
+
+func isPattern(s string) bool { return strings.HasSuffix(s, "*") }
+
+// compile turns a config into a ruleset ready to evaluate.
+func compile(cfg Config) *state {
 	edges := make(map[string]bool, len(cfg.AllowedEdges))
 	for _, e := range cfg.AllowedEdges {
 		edges[e[0]+sep+e[1]] = true
 	}
-	return &Guard{cfg: cfg, edges: edges}
+	pairs := make(map[string]bool, len(cfg.AllowedPairs))
+	var globs []pairRule
+	for _, p := range cfg.AllowedPairs {
+		if isPattern(p[0]) || isPattern(p[1]) {
+			globs = append(globs, pairRule{from: p[0], to: p[1]})
+			continue
+		}
+		pairs[p[0]+sep+p[1]] = true
+	}
+	return &state{cfg: cfg, edges: edges, pairs: pairs, globs: globs}
+}
+
+// New returns a Guard for the given config.
+func New(cfg Config) *Guard {
+	return &Guard{st: compile(cfg)}
+}
+
+// Replace swaps in a new ruleset atomically, with no restart and no dropped
+// calls. This is what lets an operator change who may call whom from the
+// console: the alternative, editing a file and restarting the enforcement
+// point, is not something a security team can be asked to do for a routine
+// permission change, and it leaves no record of who changed what.
+func (g *Guard) Replace(cfg Config) {
+	st := compile(cfg)
+	g.mu.Lock()
+	g.st = st
+	g.mu.Unlock()
+}
+
+// snap returns the current ruleset.
+func (g *Guard) snap() *state {
+	g.mu.RLock()
+	st := g.st
+	g.mu.RUnlock()
+	return st
+}
+
+// pairAllowed reports whether a rule names this exact caller and callee,
+// either literally or through a pattern, and returns the rule that matched.
+func (st *state) pairAllowed(caller, callee string) (pairRule, bool) {
+	if st.pairs[caller+sep+callee] {
+		return pairRule{from: caller, to: callee}, true
+	}
+	for _, r := range st.globs {
+		if matches(r.from, caller) && matches(r.to, callee) {
+			return r, true
+		}
+	}
+	return pairRule{}, false
 }
 
 // CalleeAgent returns the target agent id when tool is an agent-to-agent call,
 // and false otherwise.
-func (g *Guard) CalleeAgent(tool string) (string, bool) {
-	p := g.cfg.AgentToolPrefix
+func (g *Guard) CalleeAgent(tool string) (string, bool) { return g.snap().calleeAgent(tool) }
+
+func (st *state) calleeAgent(tool string) (string, bool) {
+	p := st.cfg.AgentToolPrefix
 	if p == "" || !strings.HasPrefix(tool, p) {
 		return "", false
 	}
@@ -103,8 +236,8 @@ func (g *Guard) CalleeAgent(tool string) (string, bool) {
 	return callee, true
 }
 
-func (g *Guard) zone(agent string) string {
-	if z, ok := g.cfg.Zones[agent]; ok {
+func (st *state) zone(agent string) string {
+	if z, ok := st.cfg.Zones[agent]; ok {
 		return z
 	}
 	return ""
@@ -114,7 +247,7 @@ func (g *Guard) zone(agent string) string {
 // when the agent has no entry. Exported for read-only surfaces (the flow-map
 // policy overlay) that need to place an agent without a live token.
 func (g *Guard) ZoneOf(agent string) string {
-	return g.zone(agent)
+	return g.snap().zone(agent)
 }
 
 // Snapshot returns a deep copy of the guard's configuration, for read-only
@@ -122,19 +255,24 @@ func (g *Guard) ZoneOf(agent string) string {
 // proposed config on top of the existing zones). Mutating the result does not
 // affect the guard.
 func (g *Guard) Snapshot() Config {
+	st := g.snap()
 	out := Config{
-		AgentToolPrefix: g.cfg.AgentToolPrefix,
-		AllowIntraZone:  g.cfg.AllowIntraZone,
+		AgentToolPrefix: st.cfg.AgentToolPrefix,
+		AllowIntraZone:  st.cfg.AllowIntraZone,
 	}
-	if g.cfg.Zones != nil {
-		out.Zones = make(map[string]string, len(g.cfg.Zones))
-		for k, v := range g.cfg.Zones {
+	if st.cfg.Zones != nil {
+		out.Zones = make(map[string]string, len(st.cfg.Zones))
+		for k, v := range st.cfg.Zones {
 			out.Zones[k] = v
 		}
 	}
-	if g.cfg.AllowedEdges != nil {
-		out.AllowedEdges = make([][2]string, len(g.cfg.AllowedEdges))
-		copy(out.AllowedEdges, g.cfg.AllowedEdges)
+	if st.cfg.AllowedEdges != nil {
+		out.AllowedEdges = make([][2]string, len(st.cfg.AllowedEdges))
+		copy(out.AllowedEdges, st.cfg.AllowedEdges)
+	}
+	if st.cfg.AllowedPairs != nil {
+		out.AllowedPairs = make([][2]string, len(st.cfg.AllowedPairs))
+		copy(out.AllowedPairs, st.cfg.AllowedPairs)
 	}
 	return out
 }
@@ -150,40 +288,84 @@ func (g *Guard) Snapshot() Config {
 // directory: on this call the gateway sees only the callee's name, not its
 // token.
 func (g *Guard) Check(callerAgent, callerZone, tool string) Result {
-	callee, ok := g.CalleeAgent(tool)
+	// One snapshot for the whole decision: a rule change mid-call must not
+	// let this call be judged against two different rulesets.
+	st := g.snap()
+	callee, ok := st.calleeAgent(tool)
 	if !ok {
 		return Result{Verdict: VerdictAllow, EastWest: false, CallerAgent: callerAgent}
 	}
 	cz := callerZone
 	if cz == "" {
-		cz = g.zone(callerAgent)
+		cz = st.zone(callerAgent)
 	}
-	tz := g.zone(callee)
+	tz := st.zone(callee)
 	res := Result{
 		CallerAgent: callerAgent, CalleeAgent: callee,
 		CallerZone: cz, CalleeZone: tz, EastWest: true,
 	}
 
-	// Same-zone shortcut, when permitted.
-	if g.cfg.AllowIntraZone && cz != "" && cz == tz {
+	// A rule naming these two agents wins over anything label-derived. This is
+	// the control the product is about, so it is decided first and reported as
+	// its own kind: the audit trail can then show that a human authorised this
+	// specific caller to reach this specific callee.
+	if rule, ok := st.pairAllowed(callerAgent, callee); ok {
 		res.Verdict = VerdictAllow
-		res.Reason = fmt.Sprintf("intra-zone call within %q", cz)
+		res.DecidedBy = "agent-rule"
+		if rule.from == callerAgent && rule.to == callee {
+			res.Reason = fmt.Sprintf("rule permits %s -> %s", callerAgent, callee)
+		} else {
+			res.Reason = fmt.Sprintf("rule %s -> %s permits %s -> %s", rule.from, rule.to, callerAgent, callee)
+		}
 		return res
 	}
 
-	// Explicit directed edge from caller zone to callee zone.
-	g.mu.RLock()
-	allowed := g.edges[cz+sep+tz]
-	g.mu.RUnlock()
-	if allowed {
+	// Label rule: one entry standing for many pairs. Same decision, written at
+	// a coarser grain.
+	if st.edges[cz+sep+tz] {
 		res.Verdict = VerdictAllow
-		res.Reason = fmt.Sprintf("east-west path %s -> %s permitted", zoneLabel(cz), zoneLabel(tz))
+		res.DecidedBy = "label-rule"
+		res.Reason = fmt.Sprintf("rule permits %s -> %s, which covers %s -> %s",
+			zoneLabel(cz), zoneLabel(tz), callerAgent, callee)
 		return res
 	}
 
-	// Default-deny.
+	// Shared label. Evaluated last and named plainly, because no rule was
+	// written for this pair: they reach each other only by belonging to the
+	// same group.
+	if st.cfg.AllowIntraZone && cz != "" && cz == tz {
+		res.Verdict = VerdictAllow
+		res.DecidedBy = "shared-label"
+		res.Reason = fmt.Sprintf(
+			"%s and %s both carry label %q and intra-label calls are enabled; no rule names this pair",
+			callerAgent, callee, cz)
+		return res
+	}
+
+	// Default-deny. Distinguish "no path between two known zones" (a policy
+	// decision) from "the callee is in no zone at all" (a config gap), because
+	// the second is almost always a mistake and is otherwise invisible.
+	// Observe mode: report the decision, do not impose it.
+	if st.cfg.ObserveOnly {
+		res.Verdict = VerdictAllow
+		res.WouldDeny = true
+		res.DecidedBy = "observe-only"
+		res.Reason = fmt.Sprintf(
+			"observe mode: no rule permits %s -> %s, so this would be blocked once enforcement is on",
+			callerAgent, callee)
+		return res
+	}
+
 	res.Verdict = VerdictDeny
-	res.Reason = fmt.Sprintf("no east-west path from zone %s to zone %s (default-deny)", zoneLabel(cz), zoneLabel(tz))
+	res.DecidedBy = "default-deny"
+	if tz == "" {
+		res.CalleeUnzoned = true
+		res.Reason = fmt.Sprintf(
+			"no rule permits %s -> %s, and %s carries no label either, so no label rule can cover it (add a rule for this pair, or label the agent)",
+			callerAgent, callee, callee)
+		return res
+	}
+	res.Reason = fmt.Sprintf("no rule permits %s -> %s (default-deny)", callerAgent, callee)
 	return res
 }
 

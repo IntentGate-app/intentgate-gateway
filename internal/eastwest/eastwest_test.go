@@ -157,3 +157,180 @@ func TestCalleeAgent(t *testing.T) {
 		t.Fatalf("ordinary tool must not be an agent target")
 	}
 }
+
+// --- Per-agent rules ------------------------------------------------------
+//
+// The unit of control is one named caller calling one named callee. These
+// tests pin that a rule about two agents decides on its own, with no label
+// involved, and that sharing a label still grants nothing.
+
+// A rule naming two agents permits exactly that pair, with no labels at all.
+func TestCheck_AgentRule_ExactPair(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-procure-1", "agent-finance-1"}},
+	})
+	r := g.Check("agent-procure-1", "", "agent:agent-finance-1")
+	if r.Verdict != VerdictAllow {
+		t.Fatalf("named pair should be allowed, got %s (%s)", r.Verdict, r.Reason)
+	}
+	if r.DecidedBy != "agent-rule" {
+		t.Fatalf("DecidedBy = %q, want agent-rule", r.DecidedBy)
+	}
+}
+
+// The rule is directional: naming a -> b must not permit b -> a.
+func TestCheck_AgentRule_IsDirectional(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-procure-1", "agent-finance-1"}},
+	})
+	r := g.Check("agent-finance-1", "", "agent:agent-procure-1")
+	if r.Verdict != VerdictDeny {
+		t.Fatalf("reverse direction must be denied, got %s (%s)", r.Verdict, r.Reason)
+	}
+}
+
+// A rule about one pair must not leak to a sibling that no rule names.
+func TestCheck_AgentRule_DoesNotCoverSiblings(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-procure-1", "agent-finance-1"}},
+	})
+	r := g.Check("agent-procure-1", "", "agent:agent-finance-2")
+	if r.Verdict != VerdictDeny {
+		t.Fatalf("unnamed callee must be denied, got %s (%s)", r.Verdict, r.Reason)
+	}
+	r2 := g.Check("agent-procure-2", "", "agent:agent-finance-1")
+	if r2.Verdict != VerdictDeny {
+		t.Fatalf("unnamed caller must be denied, got %s (%s)", r2.Verdict, r2.Reason)
+	}
+}
+
+// A trailing-* pattern writes a fleet rule without listing every member.
+func TestCheck_AgentRule_Pattern(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-procure-*", "agent-finance-1"}},
+	})
+	for _, caller := range []string{"agent-procure-1", "agent-procure-9"} {
+		if r := g.Check(caller, "", "agent:agent-finance-1"); r.Verdict != VerdictAllow {
+			t.Fatalf("%s should match the pattern, got %s (%s)", caller, r.Verdict, r.Reason)
+		}
+	}
+	if r := g.Check("agent-support-1", "", "agent:agent-finance-1"); r.Verdict != VerdictDeny {
+		t.Fatalf("non-matching caller must be denied, got %s (%s)", r.Verdict, r.Reason)
+	}
+}
+
+// Sharing a label grants nothing on its own. This is the property that
+// separates per-agent control from group segmentation.
+func TestCheck_SharedLabelGrantsNothing(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		Zones: map[string]string{
+			"agent-finance-1": "finance",
+			"agent-finance-2": "finance",
+		},
+		AllowIntraZone: false,
+	})
+	r := g.Check("agent-finance-1", "", "agent:agent-finance-2")
+	if r.Verdict != VerdictDeny {
+		t.Fatalf("same label must not imply a path, got %s (%s)", r.Verdict, r.Reason)
+	}
+	if r.DecidedBy != "default-deny" {
+		t.Fatalf("DecidedBy = %q, want default-deny", r.DecidedBy)
+	}
+}
+
+// An agent rule works even when neither agent carries a label, so labels are
+// genuinely optional rather than a hidden prerequisite.
+func TestCheck_AgentRule_NeedsNoLabels(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-a", "agent-b"}},
+	})
+	r := g.Check("agent-a", "", "agent:agent-b")
+	if r.Verdict != VerdictAllow {
+		t.Fatalf("unlabelled pair with a rule should be allowed, got %s (%s)", r.Verdict, r.Reason)
+	}
+	if r.CalleeUnzoned {
+		t.Fatalf("CalleeUnzoned must not be set when a rule decided the call")
+	}
+}
+
+// When a label rule decides the call, the audit says so, so a reviewer can
+// tell a per-agent authorisation from a group-level one.
+func TestCheck_LabelRuleIsReportedAsSuch(t *testing.T) {
+	g := New(base())
+	r := g.Check("agent-procure", "", "agent:agent-finance")
+	if r.Verdict != VerdictAllow {
+		t.Fatalf("label rule should still allow, got %s (%s)", r.Verdict, r.Reason)
+	}
+	if r.DecidedBy != "label-rule" {
+		t.Fatalf("DecidedBy = %q, want label-rule", r.DecidedBy)
+	}
+}
+
+// --- Observe mode ---------------------------------------------------------
+
+// Observe mode lets an unruled call through and flags it, so an estate can be
+// watched before it is enforced. Without this there is no safe way to start:
+// the recommender learns from allowed traffic, and a correct default-deny
+// estate produces none.
+func TestCheck_ObserveMode_AllowsAndFlags(t *testing.T) {
+	g := New(Config{AgentToolPrefix: "agent:", ObserveOnly: true})
+	r := g.Check("agent-a", "", "agent:agent-b")
+	if r.Verdict != VerdictAllow {
+		t.Fatalf("observe mode must not block, got %s (%s)", r.Verdict, r.Reason)
+	}
+	if !r.WouldDeny {
+		t.Fatal("observe mode must flag WouldDeny so the call is recoverable from the audit")
+	}
+	if r.DecidedBy != "observe-only" {
+		t.Fatalf("DecidedBy = %q, want observe-only", r.DecidedBy)
+	}
+}
+
+// A call a rule already permits is a real allow, not an observation, even with
+// observe mode on. Otherwise the operator could not tell which paths are
+// already covered from which still need a rule.
+func TestCheck_ObserveMode_RuledCallIsNotFlagged(t *testing.T) {
+	g := New(Config{
+		AgentToolPrefix: "agent:",
+		ObserveOnly:     true,
+		AllowedPairs:    [][2]string{{"agent-a", "agent-b"}},
+	})
+	r := g.Check("agent-a", "", "agent:agent-b")
+	if r.Verdict != VerdictAllow || r.WouldDeny {
+		t.Fatalf("ruled call should be a plain allow, got %s WouldDeny=%v", r.Verdict, r.WouldDeny)
+	}
+	if r.DecidedBy != "agent-rule" {
+		t.Fatalf("DecidedBy = %q, want agent-rule", r.DecidedBy)
+	}
+}
+
+// Turning observe mode off must enforce, with no residue.
+func TestCheck_ObserveModeOff_Enforces(t *testing.T) {
+	g := New(Config{AgentToolPrefix: "agent:", ObserveOnly: false})
+	r := g.Check("agent-a", "", "agent:agent-b")
+	if r.Verdict != VerdictDeny || r.WouldDeny {
+		t.Fatalf("enforcement expected, got %s WouldDeny=%v", r.Verdict, r.WouldDeny)
+	}
+}
+
+// Replace swaps the ruleset live, which is what lets the console apply a
+// change without a restart.
+func TestReplace_SwapsRulesLive(t *testing.T) {
+	g := New(Config{AgentToolPrefix: "agent:"})
+	if r := g.Check("agent-a", "", "agent:agent-b"); r.Verdict != VerdictDeny {
+		t.Fatalf("expected deny before the rule exists, got %s", r.Verdict)
+	}
+	g.Replace(Config{
+		AgentToolPrefix: "agent:",
+		AllowedPairs:    [][2]string{{"agent-a", "agent-b"}},
+	})
+	if r := g.Check("agent-a", "", "agent:agent-b"); r.Verdict != VerdictAllow {
+		t.Fatalf("expected allow after Replace, got %s (%s)", r.Verdict, r.Reason)
+	}
+}

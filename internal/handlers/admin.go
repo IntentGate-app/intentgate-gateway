@@ -716,6 +716,10 @@ func NewAdminFlowMapHandler(cfg AdminConfig) http.Handler {
 					fe.CallerZone = callerZone
 				}
 			}
+			// One assignment site above, mirrored here, so the two spellings
+			// cannot disagree about which group a call came from.
+			fe.CallerGroup = fe.CallerZone
+			fe.CalleeGroup = fe.CalleeZone
 			annotated = append(annotated, fe)
 		}
 
@@ -740,8 +744,13 @@ type flowMapEdge struct {
 	// scope), or "" when the relevant guard is not configured.
 	Policy       string `json:"policy,omitempty"`
 	PolicyReason string `json:"policy_reason,omitempty"`
-	CallerZone   string `json:"caller_zone,omitempty"`
-	CalleeZone   string `json:"callee_zone,omitempty"`
+	// Group of the caller and callee. Emitted under both names while
+	// consumers migrate; "caller_zone"/"callee_zone" are scheduled for
+	// removal.
+	CallerGroup string `json:"caller_group,omitempty"`
+	CalleeGroup string `json:"callee_group,omitempty"`
+	CallerZone  string `json:"caller_zone,omitempty"`
+	CalleeZone  string `json:"callee_zone,omitempty"`
 }
 
 // NewAdminFlowRecommendHandler returns the GET /v1/admin/flow-map/recommend
@@ -788,18 +797,28 @@ func NewAdminFlowRecommendHandler(cfg AdminConfig) http.Handler {
 		// recommended edges and observed intra-zone setting.
 		ewc := struct {
 			AgentToolPrefix string            `json:"agent_tool_prefix"`
+			AllowIntraGrp   bool              `json:"allow_intra_group"`
 			AllowIntraZone  bool              `json:"allow_intra_zone"`
+			Groups          map[string]string `json:"groups"`
 			Zones           map[string]string `json:"zones"`
+			AllowedPairs    [][2]string       `json:"allowed_pairs"`
 			AllowedEdges    [][2]string       `json:"allowed_edges"`
 		}{
 			AgentToolPrefix: prefix,
-			AllowIntraZone:  rec.IntraZoneObserved,
-			Zones:           map[string]string{},
-			AllowedEdges:    rec.AllowedEdges,
+			// The per-agent proposal already covers every observed call, so a
+			// label rule on top would only widen it. Proposing both would let
+			// an operator adopt the looser one by accident.
+			AllowIntraGrp:  false,
+			AllowIntraZone: false,
+			Groups:         map[string]string{},
+			Zones:          map[string]string{},
+			AllowedPairs:   rec.AllowedPairs,
+			AllowedEdges:   [][2]string{},
 		}
 		if cfg.EastWest != nil {
 			snap := cfg.EastWest.Snapshot()
 			if snap.Zones != nil {
+				ewc.Groups = snap.Zones
 				ewc.Zones = snap.Zones
 			}
 			if snap.AgentToolPrefix != "" {
@@ -833,12 +852,38 @@ func NewAdminFlowRecommendHandler(cfg AdminConfig) http.Handler {
 // INTENTGATE_ZONE_SCOPE_CONFIG) so the console can round-trip it.
 type segmentationConfig struct {
 	EastWest struct {
-		Enabled         bool              `json:"enabled"`
-		AgentToolPrefix string            `json:"agent_tool_prefix"`
-		AllowIntraZone  bool              `json:"allow_intra_zone"`
-		Zones           map[string]string `json:"zones"`
-		AllowedEdges    [][2]string       `json:"allowed_edges"`
+		Enabled         bool   `json:"enabled"`
+		AgentToolPrefix string `json:"agent_tool_prefix"`
+		// Group labels. "groups" is the supported name; "zones" is emitted
+		// alongside it and still accepted on write so a console can migrate
+		// independently of the gateway. The old key is scheduled for removal.
+		Groups         map[string]string `json:"groups"`
+		Zones          map[string]string `json:"zones"`
+		AllowIntraGrp  bool              `json:"allow_intra_group"`
+		AllowIntraZone bool              `json:"allow_intra_zone"`
+		// Rules written against group labels rather than agent ids.
+		AllowedGroupCalls [][2]string `json:"allowed_group_calls"`
+		AllowedEdges      [][2]string `json:"allowed_edges"`
+		// The per-agent rules. These are the primary control, so any surface
+		// that decides "is this permitted" has to read them: answering with
+		// AllowedEdges alone reports a config that grants nothing while the
+		// gateway is in fact allowing traffic.
+		AllowedPairs [][2]string `json:"allowed_pairs"`
+		// ObserveOnly means the rules are being reported, not imposed. Any
+		// surface that shows a verdict has to show this too, or it is telling
+		// the operator their estate is segmented when nothing is being
+		// stopped.
+		ObserveOnly bool `json:"observe_only"`
 	} `json:"east_west"`
+	// Which tools each group may reach. Agent-to-tool, not agent-to-agent.
+	ToolScope struct {
+		Enabled bool `json:"enabled"`
+		Scopes  map[string]struct {
+			Tools   []string `json:"tools"`
+			Tenants []string `json:"tenants,omitempty"`
+		} `json:"scopes"`
+	} `json:"tool_scope"`
+	// Deprecated alias, still emitted and accepted while consoles migrate.
 	ZoneScope struct {
 		Enabled bool `json:"enabled"`
 		Scopes  map[string]struct {
@@ -846,6 +891,40 @@ type segmentationConfig struct {
 			Tenants []string `json:"tenants,omitempty"`
 		} `json:"scopes"`
 	} `json:"zone_scope"`
+}
+
+// normalise resolves the old and new spellings onto the new fields, then
+// mirrors them back onto the old ones. Every reader downstream can then use
+// one set of names, and every client, old or new, sees the shape it expects.
+// Doing this once at the edge is what keeps the dual vocabulary from leaking
+// into the decision logic, where two names for one thing becomes two rules.
+func (c *segmentationConfig) normalise() {
+	ew := &c.EastWest
+	if len(ew.Groups) == 0 {
+		ew.Groups = ew.Zones
+	}
+	ew.Zones = ew.Groups
+	ew.AllowIntraGrp = ew.AllowIntraGrp || ew.AllowIntraZone
+	ew.AllowIntraZone = ew.AllowIntraGrp
+	if len(ew.AllowedGroupCalls) > 0 {
+		// Union, not replace: a client mid-migration can legitimately send
+		// some rules under each key, and dropping either set would silently
+		// revoke live authorizations.
+		seen := map[[2]string]bool{}
+		for _, e := range ew.AllowedEdges {
+			seen[e] = true
+		}
+		for _, e := range ew.AllowedGroupCalls {
+			if !seen[e] {
+				ew.AllowedEdges = append(ew.AllowedEdges, e)
+			}
+		}
+	}
+	ew.AllowedGroupCalls = ew.AllowedEdges
+	if len(c.ToolScope.Scopes) == 0 && len(c.ZoneScope.Scopes) > 0 {
+		c.ToolScope = c.ZoneScope
+	}
+	c.ZoneScope = c.ToolScope
 }
 
 // NewAdminSegmentationHandler returns the GET /v1/admin/segmentation handler.
@@ -870,6 +949,7 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 		var out segmentationConfig
 		out.EastWest.Zones = map[string]string{}
 		out.EastWest.AllowedEdges = [][2]string{}
+		out.EastWest.AllowedPairs = [][2]string{}
 		out.EastWest.AgentToolPrefix = "agent:"
 		out.ZoneScope.Scopes = map[string]struct {
 			Tools   []string `json:"tools"`
@@ -889,6 +969,10 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 			if snap.AllowedEdges != nil {
 				out.EastWest.AllowedEdges = snap.AllowedEdges
 			}
+			if snap.AllowedPairs != nil {
+				out.EastWest.AllowedPairs = snap.AllowedPairs
+			}
+			out.EastWest.ObserveOnly = snap.ObserveOnly
 		}
 		if cfg.ZoneScope != nil {
 			snap := cfg.ZoneScope.Snapshot()
@@ -901,6 +985,9 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 			}
 		}
 
+		// Emit both vocabularies so a console on either version reads a
+		// complete config.
+		out.normalise()
 		_ = json.NewEncoder(w).Encode(out)
 	})
 }
@@ -946,6 +1033,10 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			adminError(w, http.StatusBadRequest, "invalid segmentation JSON: "+err.Error())
 			return
 		}
+		// Resolve whichever vocabulary the client sent before anything reads
+		// the struct. Validating first would reject a config that is complete
+		// but written in the other spelling.
+		body.normalise()
 		if err := validateSegmentation(body); err != nil {
 			adminError(w, http.StatusBadRequest, err.Error())
 			return
@@ -957,11 +1048,23 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			if prefix == "" {
 				prefix = "agent:"
 			}
+			// Written with both spellings. A gateway rolled back to an older
+			// build has to still read the file it finds on disk, so dropping
+			// the old keys here would turn a routine rollback into an estate
+			// with no group labels and no label rules.
 			ew := map[string]any{
-				"agent_tool_prefix": prefix,
-				"allow_intra_zone":  body.EastWest.AllowIntraZone,
-				"zones":             orEmptyMap(body.EastWest.Zones),
-				"allowed_edges":     orEmptyEdges(body.EastWest.AllowedEdges),
+				"agent_tool_prefix":   prefix,
+				"allow_intra_group":   body.EastWest.AllowIntraGrp,
+				"allow_intra_zone":    body.EastWest.AllowIntraGrp,
+				"groups":              orEmptyMap(body.EastWest.Groups),
+				"zones":               orEmptyMap(body.EastWest.Groups),
+				"allowed_group_calls": orEmptyEdges(body.EastWest.AllowedEdges),
+				"allowed_edges":       orEmptyEdges(body.EastWest.AllowedEdges),
+				// The per-agent rules are the primary control. Omitting them
+				// here would silently delete every agent-to-agent rule the
+				// moment anyone saved from the console.
+				"allowed_pairs": orEmptyEdges(body.EastWest.AllowedPairs),
+				"observe_only":  body.EastWest.ObserveOnly,
 			}
 			if err := writeJSONFile(cfg.EastWestConfigPath, ew); err != nil {
 				cfg.Logger.Error("write east-west config failed", "err", err)
@@ -971,7 +1074,7 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			wrote = append(wrote, cfg.EastWestConfigPath)
 		}
 		if cfg.ZoneScopeConfigPath != "" {
-			zs := map[string]any{"scopes": body.ZoneScope.Scopes}
+			zs := map[string]any{"scopes": body.ToolScope.Scopes}
 			if err := writeJSONFile(cfg.ZoneScopeConfigPath, zs); err != nil {
 				cfg.Logger.Error("write zone-scope config failed", "err", err)
 				adminError(w, http.StatusInternalServerError, "could not write zone-scope config: "+err.Error())
@@ -980,10 +1083,40 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			wrote = append(wrote, cfg.ZoneScopeConfigPath)
 		}
 
-		cfg.Logger.Info("segmentation config updated", "files", wrote)
+		// Apply live. Asking a security team to restart the enforcement point
+		// to change a permission is not a workflow anyone will accept, and a
+		// restart window is exactly when calls go unpoliced. The file write
+		// above is what makes the change survive a restart; this is what makes
+		// it take effect now.
+		applied := false
+		if cfg.EastWest != nil {
+			live := cfg.EastWest.Snapshot()
+			live.AllowIntraZone = body.EastWest.AllowIntraGrp
+			live.Zones = orEmptyMap(body.EastWest.Groups)
+			live.AllowedEdges = orEmptyEdges(body.EastWest.AllowedEdges)
+			live.AllowedPairs = orEmptyEdges(body.EastWest.AllowedPairs)
+			live.ObserveOnly = body.EastWest.ObserveOnly
+			if p := body.EastWest.AgentToolPrefix; p != "" {
+				live.AgentToolPrefix = p
+			}
+			cfg.EastWest.Replace(live)
+			applied = true
+		}
+
+		cfg.Logger.Info("segmentation config updated",
+			"files", wrote,
+			"applied_live", applied,
+			"agent_rules", len(body.EastWest.AllowedPairs),
+			"label_rules", len(body.EastWest.AllowedEdges),
+			// Only a superadmin reaches this path (per-tenant tokens are
+			// rejected above). Recording who beyond that needs named operator
+			// identities on the admin API, which the token model does not
+			// carry yet: see the audit gap noted on this endpoint.
+			"actor", "superadmin")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":                 true,
-			"applied_on_restart": true,
+			"applied_live":       applied,
+			"applied_on_restart": !applied,
 			"wrote":              wrote,
 		})
 	})
@@ -1084,7 +1217,7 @@ func NewAdminSegmentationDraftHandler(cfg AdminConfig) http.Handler {
 				Tenants []string `json:"tenants,omitempty"`
 			}{Tools: tools, Tenants: d.ZoneTenants[zone]}
 		}
-		// Zones that carry only a tenant restriction still need a scope entry.
+		// Groups that carry only a tenant restriction still need a scope entry.
 		for zone, tenants := range d.ZoneTenants {
 			if _, ok := out.ZoneScope.Scopes[zone]; !ok {
 				out.ZoneScope.Scopes[zone] = struct {
@@ -1094,6 +1227,9 @@ func NewAdminSegmentationDraftHandler(cfg AdminConfig) http.Handler {
 			}
 		}
 
+		// The draft is loaded straight into the console's editor, so it has to
+		// carry both vocabularies like every other config response.
+		out.normalise()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"draft":    out,
 			"warnings": d.Warnings,

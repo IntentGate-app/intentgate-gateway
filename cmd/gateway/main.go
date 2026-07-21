@@ -286,8 +286,13 @@ func main() {
 	// tool call is checked against the caller zone's allowlist (which tools,
 	// which tenants). Scopes are loaded from a JSON file at
 	// INTENTGATE_ZONE_SCOPE_CONFIG. See internal/zonescope.
-	zoneScopeEnabled := envOr("INTENTGATE_ZONE_SCOPE_ENABLED", "") == "true"
-	zoneScopeConfigPath := envOr("INTENTGATE_ZONE_SCOPE_CONFIG", "")
+	// This guard decides which TOOLS a group of agents may reach, which is
+	// agent-to-tool. It was named "zone scope" when groups were also the
+	// agent-to-agent control; they are not any more, so the supported name is
+	// TOOL_SCOPE. The ZONE_SCOPE names are still honoured for deployments that
+	// already set them, and will be removed in a future major version.
+	zoneScopeEnabled := envOr("INTENTGATE_TOOL_SCOPE_ENABLED", envOr("INTENTGATE_ZONE_SCOPE_ENABLED", "")) == "true"
+	zoneScopeConfigPath := envOr("INTENTGATE_TOOL_SCOPE_CONFIG", envOr("INTENTGATE_ZONE_SCOPE_CONFIG", ""))
 	extractorURL := envOr("INTENTGATE_EXTRACTOR_URL", "")
 	policyFile := envOr("INTENTGATE_POLICY_FILE", "")
 	redisURL := envOr("INTENTGATE_REDIS_URL", "")
@@ -597,10 +602,25 @@ func main() {
 				os.Exit(1)
 			}
 			var fileCfg struct {
-				AgentToolPrefix string            `json:"agent_tool_prefix"`
-				AllowIntraZone  bool              `json:"allow_intra_zone"`
-				Zones           map[string]string `json:"zones"`
-				AllowedEdges    [][2]string       `json:"allowed_edges"`
+				AgentToolPrefix string `json:"agent_tool_prefix"`
+				// A label attached to a set of agents. "group" is the name the
+				// product uses: it is a convenience for writing one rule
+				// instead of many, and it is not a boundary. "zones" is the
+				// original spelling and is still read so existing configs keep
+				// working; it will be dropped in a future major version.
+				Groups         map[string]string `json:"groups"`
+				Zones          map[string]string `json:"zones"`
+				AllowIntraGrp  bool              `json:"allow_intra_group"`
+				AllowIntraZone bool              `json:"allow_intra_zone"`
+				// Rules written against group labels rather than agent ids.
+				AllowedGroupCalls [][2]string `json:"allowed_group_calls"`
+				AllowedEdges      [][2]string `json:"allowed_edges"`
+				// The primary rule form: caller agent -> callee agent, either
+				// side optionally a trailing-* pattern. Read both spellings so
+				// a config can say what it means.
+				AllowedPairs  [][2]string `json:"allowed_pairs"`
+				AllowedAgents [][2]string `json:"allowed_agent_calls"`
+				ObserveOnly   bool        `json:"observe_only"`
 			}
 			if err := json.Unmarshal(raw, &fileCfg); err != nil {
 				logger.Error("invalid INTENTGATE_EASTWEST_CONFIG JSON", "err", err)
@@ -609,16 +629,39 @@ func main() {
 			if fileCfg.AgentToolPrefix != "" {
 				ewCfg.AgentToolPrefix = fileCfg.AgentToolPrefix
 			}
-			ewCfg.AllowIntraZone = fileCfg.AllowIntraZone
-			ewCfg.Zones = fileCfg.Zones
+			// New spelling wins where both are present, so a config being
+			// migrated can carry the old key without silently overriding the
+			// new one.
+			ewCfg.AllowIntraZone = fileCfg.AllowIntraZone || fileCfg.AllowIntraGrp
+			ewCfg.Zones = fileCfg.Groups
+			if len(ewCfg.Zones) == 0 {
+				ewCfg.Zones = fileCfg.Zones
+			}
+			if len(fileCfg.AllowedGroupCalls) > 0 {
+				fileCfg.AllowedEdges = append(fileCfg.AllowedEdges, fileCfg.AllowedGroupCalls...)
+			}
 			ewCfg.AllowedEdges = fileCfg.AllowedEdges
+			ewCfg.AllowedPairs = append(fileCfg.AllowedPairs, fileCfg.AllowedAgents...)
+			ewCfg.ObserveOnly = fileCfg.ObserveOnly
 		}
 		eastWest = eastwest.New(ewCfg)
 		logger.Info("east-west authorization enabled",
 			"agent_tool_prefix", ewCfg.AgentToolPrefix,
-			"zones", len(ewCfg.Zones),
-			"allowed_edges", len(ewCfg.AllowedEdges),
-			"allow_intra_zone", ewCfg.AllowIntraZone)
+			"agent_rules", len(ewCfg.AllowedPairs),
+			"labels", len(ewCfg.Zones),
+			"label_rules", len(ewCfg.AllowedEdges),
+			"allow_intra_label", ewCfg.AllowIntraZone,
+			"observe_only", ewCfg.ObserveOnly)
+		if ewCfg.ObserveOnly {
+			logger.Warn("east-west is in OBSERVE MODE: agent-to-agent calls are NOT being blocked",
+				"effect", "every call is allowed and recorded as would-be-denied",
+				"purpose", "collect the paths your agents need, then adopt the recommendation and turn this off",
+				"hint", "set observe_only:false to enforce")
+		}
+		if ewCfg.AllowIntraZone {
+			logger.Warn("allow_intra_group is on: agents sharing a label can call each other with no rule naming the pair",
+				"hint", "prefer explicit rules in allowed_pairs, using a trailing-* pattern for a fleet")
+		}
 	} else {
 		logger.Info("east-west authorization not configured (set INTENTGATE_EASTWEST_ENABLED=true to enable)")
 	}
@@ -629,7 +672,7 @@ func main() {
 		if zoneScopeConfigPath != "" {
 			raw, err := os.ReadFile(zoneScopeConfigPath)
 			if err != nil {
-				logger.Error("cannot read INTENTGATE_ZONE_SCOPE_CONFIG", "path", zoneScopeConfigPath, "err", err)
+				logger.Error("cannot read tool-scope config", "path", zoneScopeConfigPath, "err", err)
 				os.Exit(1)
 			}
 			var fileCfg struct {
@@ -639,7 +682,7 @@ func main() {
 				} `json:"scopes"`
 			}
 			if err := json.Unmarshal(raw, &fileCfg); err != nil {
-				logger.Error("invalid INTENTGATE_ZONE_SCOPE_CONFIG JSON", "err", err)
+				logger.Error("invalid tool-scope config JSON", "err", err)
 				os.Exit(1)
 			}
 			zsCfg.Scopes = make(map[string]zonescope.Scope, len(fileCfg.Scopes))
@@ -648,9 +691,9 @@ func main() {
 			}
 		}
 		zoneScope = zonescope.New(zsCfg)
-		logger.Info("zone scope enabled", "scoped_zones", len(zsCfg.Scopes))
+		logger.Info("tool scope enabled", "scoped_groups", len(zsCfg.Scopes))
 	} else {
-		logger.Info("zone scope not configured (set INTENTGATE_ZONE_SCOPE_ENABLED=true to enable)")
+		logger.Info("tool scope not configured (set INTENTGATE_TOOL_SCOPE_ENABLED=true to enable)")
 	}
 
 	policyEngine, policySource, err := loadPolicyEngine(logger, policyFile)

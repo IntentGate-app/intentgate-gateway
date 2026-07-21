@@ -22,7 +22,7 @@ configure`.
 
 ## Stability
 
-Files here track the gateway's audit event schema. A CI test ensures
-the Athena DDL covers every field on `audit.Event`; the KQL queries
-assume the gateway's default field mapping. Breaking schema changes
-are called out in release notes.
+Files here track the gateway's audit event schema. The Athena DDL and
+the KQL queries assume the gateway's default field mapping and are
+maintained by hand, so review them when `audit.Event` changes. Breaking
+schema changes are called out in release notes.
