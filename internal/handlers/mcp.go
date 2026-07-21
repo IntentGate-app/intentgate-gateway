@@ -25,6 +25,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
+	"github.com/IntentGate-app/intentgate-gateway/internal/payloads"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
 	"github.com/IntentGate-app/intentgate-gateway/internal/policy"
 	"github.com/IntentGate-app/intentgate-gateway/internal/refverify"
@@ -192,6 +193,14 @@ type MCPHandlerConfig struct {
 	// the stage is a no-op. See internal/outputschema and
 	// memos/llm05-output-schema-design.md.
 	OutputSchemas *outputschema.Registry
+	// Payloads retains what agents received back, when PayloadPolicy asks
+	// for it. Nil disables capture entirely regardless of the policy, so a
+	// deployment that has not wired a store cannot accidentally believe it
+	// is recording responses.
+	Payloads payloads.Store
+	// PayloadPolicy decides which calls are captured. Its zero value
+	// captures nothing.
+	PayloadPolicy payloads.Policy
 	// TenantScope is the opt-in LLM08 per-tenant vector-scope
 	// enforcer. When non-nil and the requested tool is marked
 	// scoped, the gateway verifies the tool-call's tenant filter
@@ -1128,9 +1137,16 @@ func (h *mcpHandler) forwardToUpstream(
 		})
 	}
 
+	// Capture sits here deliberately: after the PII filter and the
+	// output-schema guard have run, so what is stored is what the agent
+	// actually received, and before the audit emit, so the hash and the
+	// stored flag land on the same event that records the decision.
+	eventID := audit.NewEventID()
+	resultOpt := h.capturePayload(ctx, eventID, cap, params.Name, upResp.Body, parsed)
+
 	h.emitAudit(ctx, r, params, cap, intent,
 		audit.DecisionAllow, audit.CheckUpstream, "forwarded", start, upResp.Status,
-		withRequiresStepUp(requiresStepUp))
+		withRequiresStepUp(requiresStepUp), withEventID(eventID), resultOpt)
 
 	return &parsed
 }
