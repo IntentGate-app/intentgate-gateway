@@ -620,7 +620,15 @@ func main() {
 				// a config can say what it means.
 				AllowedPairs  [][2]string `json:"allowed_pairs"`
 				AllowedAgents [][2]string `json:"allowed_agent_calls"`
-				ObserveOnly   bool        `json:"observe_only"`
+				// The same permission carried as a governed record: purpose,
+				// owner, approval, expiry, review date. Evaluated alongside
+				// AllowedPairs, so a config may use either form or both. The
+				// expiry here is enforced, not decorative, which is the reason
+				// this has to be parsed rather than tolerated: a rules block
+				// the loader ignored would leave the console showing
+				// permissions the gateway was not applying.
+				Rules       []eastwest.Rule `json:"rules"`
+				ObserveOnly bool            `json:"observe_only"`
 			}
 			if err := json.Unmarshal(raw, &fileCfg); err != nil {
 				logger.Error("invalid INTENTGATE_EASTWEST_CONFIG JSON", "err", err)
@@ -642,12 +650,14 @@ func main() {
 			}
 			ewCfg.AllowedEdges = fileCfg.AllowedEdges
 			ewCfg.AllowedPairs = append(fileCfg.AllowedPairs, fileCfg.AllowedAgents...)
+			ewCfg.Rules = fileCfg.Rules
 			ewCfg.ObserveOnly = fileCfg.ObserveOnly
 		}
 		eastWest = eastwest.New(ewCfg)
 		logger.Info("east-west authorization enabled",
 			"agent_tool_prefix", ewCfg.AgentToolPrefix,
 			"agent_rules", len(ewCfg.AllowedPairs),
+			"governed_rules", len(ewCfg.Rules),
 			"labels", len(ewCfg.Zones),
 			"label_rules", len(ewCfg.AllowedEdges),
 			"allow_intra_label", ewCfg.AllowIntraZone,

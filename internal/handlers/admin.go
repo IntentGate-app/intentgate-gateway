@@ -876,6 +876,12 @@ type segmentationConfig struct {
 		// AllowedEdges alone reports a config that grants nothing while the
 		// gateway is in fact allowing traffic.
 		AllowedPairs [][2]string `json:"allowed_pairs"`
+		// The same permissions carried as governed records: purpose, owner,
+		// approval, expiry, review date. AllowedPairs and Rules are evaluated
+		// together, so both have to cross this boundary. A gateway that
+		// enforced an expiry it never reported would leave the console showing
+		// a permission that had already stopped working.
+		Rules []eastwest.Rule `json:"rules"`
 		// ObserveOnly means the rules are being reported, not imposed. Any
 		// surface that shows a verdict has to show this too, or it is telling
 		// the operator their estate is segmented when nothing is being
@@ -957,6 +963,7 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 		out.EastWest.Zones = map[string]string{}
 		out.EastWest.AllowedEdges = [][2]string{}
 		out.EastWest.AllowedPairs = [][2]string{}
+		out.EastWest.Rules = []eastwest.Rule{}
 		out.EastWest.AgentToolPrefix = "agent:"
 		out.ZoneScope.Scopes = map[string]struct {
 			Tools   []string `json:"tools"`
@@ -978,6 +985,9 @@ func NewAdminSegmentationHandler(cfg AdminConfig) http.Handler {
 			}
 			if snap.AllowedPairs != nil {
 				out.EastWest.AllowedPairs = snap.AllowedPairs
+			}
+			if snap.Rules != nil {
+				out.EastWest.Rules = snap.Rules
 			}
 			out.EastWest.ObserveOnly = snap.ObserveOnly
 		}
@@ -1069,6 +1079,13 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			if body.EastWest.AllowedPairs == nil {
 				body.EastWest.AllowedPairs = live.AllowedPairs
 			}
+			// Rules carry the justification for each permission. A client that
+			// edits labels and says nothing about rules must not thereby
+			// discard every purpose, owner and approval in the estate, which
+			// is precisely what the bare-pairs version of this handler did.
+			if body.EastWest.Rules == nil {
+				body.EastWest.Rules = live.Rules
+			}
 			if body.EastWest.AllowedEdges == nil {
 				body.EastWest.AllowedEdges = live.AllowedEdges
 				body.EastWest.AllowedGroupCalls = live.AllowedEdges
@@ -1101,6 +1118,7 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 				// here would silently delete every agent-to-agent rule the
 				// moment anyone saved from the console.
 				"allowed_pairs": orEmptyEdges(body.EastWest.AllowedPairs),
+				"rules":         orEmptyRules(body.EastWest.Rules),
 				"observe_only":  body.EastWest.ObserveOnly,
 			}
 			if err := writeJSONFile(cfg.EastWestConfigPath, ew); err != nil {
@@ -1132,6 +1150,7 @@ func NewAdminSegmentationWriteHandler(cfg AdminConfig) http.Handler {
 			live.Zones = orEmptyMap(body.EastWest.Groups)
 			live.AllowedEdges = orEmptyEdges(body.EastWest.AllowedEdges)
 			live.AllowedPairs = orEmptyEdges(body.EastWest.AllowedPairs)
+			live.Rules = orEmptyRules(body.EastWest.Rules)
 			live.ObserveOnly = body.EastWest.ObserveOnly
 			if p := body.EastWest.AgentToolPrefix; p != "" {
 				live.AgentToolPrefix = p
@@ -1198,6 +1217,18 @@ func orEmptyEdges(e [][2]string) [][2]string {
 		return [][2]string{}
 	}
 	return e
+}
+
+// orEmptyRules exists for the same reason as orEmptyEdges: a nil slice
+// marshals to null, and a config file carrying "rules": null reads back as a
+// gateway with no governance records at all. The caller has already decided
+// whether nil means "preserve" (merged from the live snapshot before this
+// point) or "the operator cleared them"; by here it can only mean the latter.
+func orEmptyRules(r []eastwest.Rule) []eastwest.Rule {
+	if r == nil {
+		return []eastwest.Rule{}
+	}
+	return r
 }
 
 // NewAdminSegmentationDraftHandler returns the POST /v1/admin/segmentation/draft
