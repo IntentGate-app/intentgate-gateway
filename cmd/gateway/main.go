@@ -205,6 +205,9 @@ func main() {
 
 	addr := envOr("INTENTGATE_ADDR", ":8080")
 	requireCap := envOr("INTENTGATE_REQUIRE_CAPABILITY", "") == "true"
+	// Separation of duties on policy promotion. Off unless explicitly
+	// asked for: see server.Config.RequirePolicyApproval.
+	requirePolicyApproval := envOr("INTENTGATE_POLICY_REQUIRE_APPROVAL", "") == "true"
 	requireIntent := envOr("INTENTGATE_REQUIRE_INTENT", "") == "true"
 	requireBudget := envOr("INTENTGATE_REQUIRE_BUDGET", "") == "true"
 	// Opt-in AAI03 (Memory Poisoning) defense. Off by default — the
@@ -1096,6 +1099,7 @@ func main() {
 		PolicyStore:           policyStore,
 		PolicyReloader:        policyReloader,
 		PolicySource:          startupPolicySource,
+		RequirePolicyApproval: requirePolicyApproval,
 		TenantAdmins:          tenantAdmins,
 		AdminToken:            adminToken,
 		Metrics:               metricsHandle,

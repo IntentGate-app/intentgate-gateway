@@ -466,16 +466,19 @@ func (s *PostgresStore) DeleteDraft(ctx context.Context, id string) error {
 // callers can detect "no active set" via CurrentDraftID == "".
 func (s *PostgresStore) GetActive(ctx context.Context, tenant string) (Active, error) {
 	const q = `
-		SELECT tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by
+		SELECT tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by,
+		       proposed_draft_id, proposed_by, proposed_at, approved_by
 		FROM policy_active
 		WHERE tenant = $1
 	`
 	var (
 		a          Active
 		promotedAt sql.NullTime
+		proposedAt sql.NullTime
 	)
 	if err := s.pool.QueryRow(ctx, q, tenant).Scan(
 		&a.Tenant, &a.CurrentDraftID, &a.PreviousDraftID, &promotedAt, &a.PromotedBy,
+		&a.ProposedDraftID, &a.ProposedBy, &proposedAt, &a.ApprovedBy,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, sql.ErrNoRows) {
 			return Active{Tenant: tenant}, nil
@@ -485,6 +488,9 @@ func (s *PostgresStore) GetActive(ctx context.Context, tenant string) (Active, e
 	if promotedAt.Valid {
 		a.PromotedAt = promotedAt.Time.UTC()
 	}
+	if proposedAt.Valid {
+		a.ProposedAt = proposedAt.Time.UTC()
+	}
 	return a, nil
 }
 
@@ -493,7 +499,8 @@ func (s *PostgresStore) GetActive(ctx context.Context, tenant string) (Active, e
 // before per-tenant overlays.
 func (s *PostgresStore) ListActive(ctx context.Context) ([]Active, error) {
 	const q = `
-		SELECT tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by
+		SELECT tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by,
+		       proposed_draft_id, proposed_by, proposed_at, approved_by
 		FROM policy_active
 		ORDER BY (tenant = '') DESC, tenant ASC
 	`
@@ -508,12 +515,19 @@ func (s *PostgresStore) ListActive(ctx context.Context) ([]Active, error) {
 		var (
 			a          Active
 			promotedAt sql.NullTime
+			proposedAt sql.NullTime
 		)
-		if err := rows.Scan(&a.Tenant, &a.CurrentDraftID, &a.PreviousDraftID, &promotedAt, &a.PromotedBy); err != nil {
+		if err := rows.Scan(
+			&a.Tenant, &a.CurrentDraftID, &a.PreviousDraftID, &promotedAt, &a.PromotedBy,
+			&a.ProposedDraftID, &a.ProposedBy, &proposedAt, &a.ApprovedBy,
+		); err != nil {
 			return nil, fmt.Errorf("policystore: scan active: %w", err)
 		}
 		if promotedAt.Valid {
 			a.PromotedAt = promotedAt.Time.UTC()
+		}
+		if proposedAt.Valid {
+			a.ProposedAt = proposedAt.Time.UTC()
 		}
 		out = append(out, a)
 	}
@@ -584,14 +598,20 @@ func (s *PostgresStore) Promote(ctx context.Context, draftID, promotedBy, tenant
 	// UPSERT: tenants beyond the seeded '' default get their row
 	// created on first promote. id is a legacy column with a default
 	// of ''; the PK is (tenant) so the insert only collides on tenant.
+	// approved_by is cleared, not left in place: this is a direct
+	// promote, so no second operator signed off on what is now live,
+	// and inheriting the previous approver's name would attach them
+	// to a change they never saw. The proposal columns are untouched
+	// — a pending request survives an unrelated promote.
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO policy_active (id, tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by)
-		VALUES ('', $1, $2, $3, $4, $5)
+		INSERT INTO policy_active (id, tenant, current_draft_id, previous_draft_id, promoted_at, promoted_by, approved_by)
+		VALUES ('', $1, $2, $3, $4, $5, '')
 		ON CONFLICT (tenant) DO UPDATE
 		SET current_draft_id = EXCLUDED.current_draft_id,
 		    previous_draft_id = EXCLUDED.previous_draft_id,
 		    promoted_at = EXCLUDED.promoted_at,
-		    promoted_by = EXCLUDED.promoted_by
+		    promoted_by = EXCLUDED.promoted_by,
+		    approved_by = ''
 	`, tenant, draftID, current, now, promotedBy); err != nil {
 		return Active{}, fmt.Errorf("policystore: promote upsert: %w", err)
 	}
@@ -613,6 +633,172 @@ func (s *PostgresStore) Promote(ctx context.Context, draftID, promotedBy, tenant
 		PromotedAt:      now,
 		PromotedBy:      promotedBy,
 	}, nil
+}
+
+// Propose records draftID as awaiting approval, leaving the active
+// pointer alone. The draft-exists check shares the transaction with
+// the write for the same reason Promote's does.
+//
+// No NOTIFY: nothing on the request path changed. Waking every
+// replica to recompile because someone SUGGESTED a policy would be
+// reacting to a change that has not happened.
+func (s *PostgresStore) Propose(ctx context.Context, draftID, proposedBy, tenant string) (Active, error) {
+	if proposedBy == "" {
+		return Active{}, ErrUnidentified
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Active{}, fmt.Errorf("policystore: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM policy_drafts WHERE id = $1)`, draftID,
+	).Scan(&exists); err != nil {
+		return Active{}, fmt.Errorf("policystore: propose exists check: %w", err)
+	}
+	if !exists {
+		return Active{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO policy_active (id, tenant, proposed_draft_id, proposed_by, proposed_at)
+		VALUES ('', $1, $2, $3, $4)
+		ON CONFLICT (tenant) DO UPDATE
+		SET proposed_draft_id = EXCLUDED.proposed_draft_id,
+		    proposed_by = EXCLUDED.proposed_by,
+		    proposed_at = EXCLUDED.proposed_at
+	`, tenant, draftID, proposedBy, now); err != nil {
+		return Active{}, fmt.Errorf("policystore: propose upsert: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Active{}, fmt.Errorf("policystore: propose commit: %w", err)
+	}
+
+	// Re-read rather than synthesising: the row may already carry a
+	// current/previous pointer this call did not touch, and returning
+	// a hand-built Active would report the tenant as having no active
+	// policy purely because this function did not set one.
+	return s.GetActive(ctx, tenant)
+}
+
+// Approve promotes the pending proposal when the approver is not the
+// proposer.
+//
+// The proposer is read with SELECT ... FOR UPDATE so the row is
+// locked for the life of the transaction. Without it, two operators
+// approving at once, or a re-propose landing mid-flight, could mean
+// the draft that gets promoted is not the draft that was checked —
+// and the check is the entire feature.
+func (s *PostgresStore) Approve(ctx context.Context, approvedBy, tenant string) (Active, error) {
+	if approvedBy == "" {
+		return Active{}, ErrUnidentified
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return Active{}, fmt.Errorf("policystore: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current, proposed, proposedBy string
+	rowErr := tx.QueryRow(ctx, `
+		SELECT current_draft_id, proposed_draft_id, proposed_by
+		FROM policy_active WHERE tenant = $1
+		FOR UPDATE
+	`, tenant).Scan(&current, &proposed, &proposedBy)
+	if rowErr != nil {
+		if errors.Is(rowErr, pgx.ErrNoRows) || errors.Is(rowErr, sql.ErrNoRows) {
+			return Active{}, ErrNoProposal
+		}
+		return Active{}, fmt.Errorf("policystore: approve read: %w", rowErr)
+	}
+	if proposed == "" {
+		return Active{}, ErrNoProposal
+	}
+	if proposedBy == "" {
+		// Only reachable from a row written before this migration or
+		// by hand. Approving it would record a second party we cannot
+		// name, which is what this flow exists to prevent.
+		return Active{}, ErrUnidentified
+	}
+	if proposedBy == approvedBy {
+		return Active{}, ErrSelfApproval
+	}
+
+	var stillExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM policy_drafts WHERE id = $1)`, proposed,
+	).Scan(&stillExists); err != nil {
+		return Active{}, fmt.Errorf("policystore: approve exists check: %w", err)
+	}
+	if !stillExists {
+		// Deleted while pending.
+		return Active{}, ErrNotFound
+	}
+
+	now := time.Now().UTC()
+	// promoted_by stays the proposer: they authored the change.
+	// approved_by is the second signature. Overwriting promoted_by
+	// with the approver would erase who asked for it and leave the
+	// record showing a single name again.
+	if _, err := tx.Exec(ctx, `
+		UPDATE policy_active
+		SET current_draft_id = $1,
+		    previous_draft_id = $2,
+		    promoted_at = $3,
+		    promoted_by = $4,
+		    approved_by = $5,
+		    proposed_draft_id = '',
+		    proposed_by = '',
+		    proposed_at = NULL
+		WHERE tenant = $6
+	`, proposed, current, now, proposedBy, approvedBy, tenant); err != nil {
+		return Active{}, fmt.Errorf("policystore: approve update: %w", err)
+	}
+	// NOTIFY here, unlike Propose: the live policy really did change.
+	if _, err := tx.Exec(ctx, "SELECT pg_notify($1, $2)",
+		notifyChannel, encodeNotifyPayload(tenant, proposed)); err != nil {
+		return Active{}, fmt.Errorf("policystore: approve notify: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Active{}, fmt.Errorf("policystore: approve commit: %w", err)
+	}
+
+	return Active{
+		Tenant:          tenant,
+		CurrentDraftID:  proposed,
+		PreviousDraftID: current,
+		PromotedAt:      now,
+		PromotedBy:      proposedBy,
+		ApprovedBy:      approvedBy,
+	}, nil
+}
+
+// RejectProposal clears the pending proposal without promoting it.
+// The proposer may reject their own: withdrawing a request is not an
+// escalation, and requiring someone else to clear it would leave
+// abandoned proposals sitting in the queue.
+func (s *PostgresStore) RejectProposal(ctx context.Context, _ string, tenant string) (Active, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE policy_active
+		SET proposed_draft_id = '',
+		    proposed_by = '',
+		    proposed_at = NULL
+		WHERE tenant = $1 AND proposed_draft_id <> ''
+	`, tenant)
+	if err != nil {
+		return Active{}, fmt.Errorf("policystore: reject update: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either no row for this tenant or nothing was pending. Both
+		// mean the same thing to the caller.
+		return Active{}, ErrNoProposal
+	}
+	return s.GetActive(ctx, tenant)
 }
 
 // Rollback swaps the given tenant's Current and Previous, then
@@ -638,12 +824,19 @@ func (s *PostgresStore) Rollback(ctx context.Context, rolledBackBy, tenant strin
 	}
 
 	now := time.Now().UTC()
+	// approved_by clears for the same reason as in Promote, plus one
+	// of its own: the store keeps a single approver against whatever
+	// is live, not an approval per version, so it cannot restore the
+	// approver of the draft being rolled back to. Who approved it
+	// originally is in the audit log. Guessing here would put a name
+	// against the wrong event.
 	if _, err := tx.Exec(ctx, `
 		UPDATE policy_active
 		SET current_draft_id = $1,
 		    previous_draft_id = '',
 		    promoted_at = $2,
-		    promoted_by = $3
+		    promoted_by = $3,
+		    approved_by = ''
 		WHERE tenant = $4
 	`, previous, now, rolledBackBy, tenant); err != nil {
 		return Active{}, fmt.Errorf("policystore: rollback update: %w", err)

@@ -66,6 +66,30 @@ var ErrNotFound = errors.New("policystore: not found")
 // careless DELETE could orphan the active pointer.
 var ErrActiveDraftDelete = errors.New("policystore: cannot delete a draft that is the current or previous active policy")
 
+// ErrNoProposal is returned by Approve or RejectProposal when the
+// tenant has nothing awaiting approval.
+var ErrNoProposal = errors.New("policystore: no policy is awaiting approval")
+
+// ErrSelfApproval is returned when the approver is the same operator
+// who proposed the change.
+//
+// This error IS the separation-of-duties property. Everything else in
+// the proposal flow is bookkeeping; this is the line that makes the
+// audit record mean something. An estate where one person can author a
+// policy and put it into production alone has no second pair of eyes on
+// the control that governs every other control.
+var ErrSelfApproval = errors.New("policystore: a policy cannot be approved by the operator who proposed it")
+
+// ErrUnidentified is returned when a propose or approve arrives without
+// an operator label.
+//
+// Two anonymous operators are indistinguishable from one anonymous
+// operator, so an approval with no identity on either side cannot show
+// that two people were involved — and an audit record that cannot show
+// that is worse than none, because it looks like evidence. The store
+// refuses rather than recording an empty string as a second party.
+var ErrUnidentified = errors.New("policystore: propose and approve both require an identified operator")
+
 // Draft is a candidate Rego policy authored by an operator. It is
 // not on the request path: the gateway never reads from a Draft
 // directly. Promotion copies the Draft's source onto the active-
@@ -133,34 +157,67 @@ type Active struct {
 	PromotedAt time.Time `json:"promoted_at,omitempty"`
 	// PromotedBy is the operator label captured at promote time.
 	PromotedBy string `json:"promoted_by,omitempty"`
+
+	// ProposedDraftID is a draft put forward for promotion and
+	// waiting on a second operator. Empty means nothing is pending.
+	//
+	// One pending proposal per tenant, deliberately. A queue of
+	// competing proposals is a different feature with a different
+	// UI, and this field describes a change to THE active policy —
+	// there is one of those. Proposing again replaces the pending
+	// one, which is the behaviour an operator expects from "I got
+	// that wrong, here is the corrected version".
+	ProposedDraftID string `json:"proposed_draft_id,omitempty"`
+	// ProposedBy is the operator who put it forward. Never empty
+	// when ProposedDraftID is set: the store rejects an anonymous
+	// proposal, because the approval check has nothing to compare
+	// against without it.
+	ProposedBy string `json:"proposed_by,omitempty"`
+	// ProposedAt is when it was put forward, in UTC.
+	ProposedAt time.Time `json:"proposed_at,omitempty"`
+
+	// ApprovedBy is the second operator who approved the change that
+	// made CurrentDraftID active. Empty when the current policy was
+	// promoted directly rather than through the proposal flow, which
+	// is the honest reading: no approval was recorded, so none is
+	// claimed. A console rendering this must not fill the gap with
+	// PromotedBy — that would show the promoter as their own
+	// approver.
+	ApprovedBy string `json:"approved_by,omitempty"`
 }
 
-// MarshalJSON elides PromotedAt when it carries Go's zero time.
-// Without this, a "no draft promoted yet" response would include
-// `"promoted_at":"0001-01-01T00:00:00Z"`, which the console
-// renders as "promoted on Jan 1, year 1" in the active-policy
-// banner. Easiest to fix at the marshal step rather than scattering
-// `if !.IsZero()` checks across every caller.
+// MarshalJSON elides zero timestamps. Without this, a "nothing
+// promoted yet" response carries `"promoted_at":"0001-01-01T00:00:00Z"`,
+// which the console renders as "promoted on Jan 1, year 1" —
+// `omitempty` does nothing for time.Time because the zero value is a
+// struct, not an empty one.
+//
+// The earlier version hand-listed the surviving fields in the zero
+// case, which meant every new field on Active had to be remembered in
+// two places or it silently vanished from the API whenever nothing had
+// been promoted. Shadowing the time fields with pointers keeps one
+// list: unknown fields ride along on the embedded alias, and only the
+// timestamps need thinking about.
 func (a Active) MarshalJSON() ([]byte, error) {
 	type alias Active // avoid infinite recursion into our own MarshalJSON
-	if a.PromotedAt.IsZero() {
-		// Marshal a stripped copy with the time field cleared so
-		// Go's default `omitempty` on the zero time string doesn't
-		// trigger (the time itself is zero, but Format(RFC3339)
-		// produces "0001-...", so we need the explicit alias path).
-		return json.Marshal(struct {
-			Tenant          string `json:"tenant,omitempty"`
-			CurrentDraftID  string `json:"current_draft_id,omitempty"`
-			PreviousDraftID string `json:"previous_draft_id,omitempty"`
-			PromotedBy      string `json:"promoted_by,omitempty"`
-		}{
-			Tenant:          a.Tenant,
-			CurrentDraftID:  a.CurrentDraftID,
-			PreviousDraftID: a.PreviousDraftID,
-			PromotedBy:      a.PromotedBy,
-		})
+
+	// Outer fields shadow the embedded alias's at encode time (Go's
+	// field-depth rule applies to encoding/json), so these two win.
+	wire := struct {
+		alias
+		PromotedAt *time.Time `json:"promoted_at,omitempty"`
+		ProposedAt *time.Time `json:"proposed_at,omitempty"`
+	}{alias: alias(a)}
+
+	if !a.PromotedAt.IsZero() {
+		t := a.PromotedAt
+		wire.PromotedAt = &t
 	}
-	return json.Marshal(alias(a))
+	if !a.ProposedAt.IsZero() {
+		t := a.ProposedAt
+		wire.ProposedAt = &t
+	}
+	return json.Marshal(wire)
 }
 
 // ListFilter narrows ListDrafts results. All fields are optional;
@@ -253,6 +310,47 @@ type Store interface {
 	// a no-op (no audit event, no PromotedAt update). Implementations
 	// detect this and return the unchanged Active without writing.
 	Promote(ctx context.Context, draftID, promotedBy, tenant string) (Active, error)
+
+	// Propose puts draftID forward for promotion without making it
+	// active, and records who put it forward. The gateway keeps
+	// running the current policy: a proposal changes nothing on the
+	// request path, which is the point — it is the step that exists
+	// so that promotion is not a single action by a single person.
+	//
+	// Returns ErrNotFound if draftID is unknown, ErrUnidentified if
+	// proposedBy is empty. Replaces any existing pending proposal
+	// for the tenant, including its recorded proposer.
+	//
+	// Proposing the draft that is already active is allowed and has
+	// no special meaning; the approval will be a no-op promote. The
+	// store does not second-guess it, because "re-affirm what is
+	// running" is a legitimate thing to want a second signature on.
+	Propose(ctx context.Context, draftID, proposedBy, tenant string) (Active, error)
+
+	// Approve promotes the pending proposal, recording approvedBy
+	// alongside the proposer on the active row. Current becomes
+	// Previous exactly as in Promote, so rollback still works.
+	//
+	// Returns ErrNoProposal when nothing is pending, ErrUnidentified
+	// when approvedBy is empty, and ErrSelfApproval when approvedBy
+	// matches the proposer. That last check is the entire reason
+	// this method exists rather than callers using Promote.
+	//
+	// Implementations MUST perform the comparison and the promotion
+	// under the same lock or transaction. Reading the proposer,
+	// deciding, and then promoting in separate steps lets a
+	// concurrent re-propose slip in between, so the row that gets
+	// promoted is not the one that was checked.
+	Approve(ctx context.Context, approvedBy, tenant string) (Active, error)
+
+	// RejectProposal discards the pending proposal without promoting
+	// it. Returns ErrNoProposal when nothing is pending.
+	//
+	// Unlike Approve this does NOT refuse the proposer: withdrawing
+	// your own proposal is not a privilege escalation, it is
+	// changing your mind, and forcing someone else to clear it would
+	// leave stale proposals sitting in the queue.
+	RejectProposal(ctx context.Context, rejectedBy, tenant string) (Active, error)
 
 	// Rollback swaps Current and Previous on the active-policy
 	// pointer for the given tenant, then clears Previous (so two

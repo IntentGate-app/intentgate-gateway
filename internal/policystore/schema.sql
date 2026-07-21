@@ -86,6 +86,31 @@ END$$;
 -- compatibility; queries operate on (tenant) only. A future schema
 -- pass can drop it once we're sure no downgrade path is needed.
 
+-- 1.5 -> 1.6: separation of duties on promotion.
+--
+-- A draft can now be PROPOSED for promotion and sit awaiting a second
+-- operator, rather than going live the moment one person clicks. The
+-- four columns below carry that: three describe the pending proposal,
+-- and approved_by records the second signature on whatever is
+-- currently live.
+--
+-- All four default to empty/NULL, so an existing deployment upgrades
+-- into "nothing pending, no approval recorded" — which is the truthful
+-- description of every policy promoted before this migration existed.
+-- Nothing is backfilled: inventing an approver for historical promotes
+-- would put a real person's name against a decision they never made.
+--
+-- One pending proposal per tenant, by construction: these are columns
+-- on the active row, not a queue table. Proposing again overwrites.
+ALTER TABLE policy_active
+    ADD COLUMN IF NOT EXISTS proposed_draft_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE policy_active
+    ADD COLUMN IF NOT EXISTS proposed_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE policy_active
+    ADD COLUMN IF NOT EXISTS proposed_at TIMESTAMPTZ;
+ALTER TABLE policy_active
+    ADD COLUMN IF NOT EXISTS approved_by TEXT NOT NULL DEFAULT '';
+
 -- Seed the default-fallback row if a fresh install has no rows at
 -- all. ON CONFLICT keeps this idempotent across restarts and after
 -- per-tenant promotes have populated other rows.

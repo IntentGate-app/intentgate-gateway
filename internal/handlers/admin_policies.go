@@ -40,6 +40,25 @@ type PolicyAdminConfig struct {
 	// Audit lets promote / rollback / draft-create emit one event
 	// each so SOC has a record of who flipped the gateway's policy.
 	Audit audit.Emitter
+
+	// RequireApproval closes the direct-promote path, so the only way
+	// a draft reaches production is propose → approve by a second
+	// operator.
+	//
+	// Off by default, deliberately. Turning it on for every existing
+	// deployment at upgrade would break the promote call every one of
+	// them already automates, and a security control that arrives
+	// unannounced and breaks the pipeline gets switched off rather
+	// than adopted. Estates that want separation of duties set
+	// INTENTGATE_POLICY_REQUIRE_APPROVAL=true.
+	//
+	// Note what this flag does and does not buy. It stops promotion
+	// by one person through this API. It does not stop an operator
+	// with filesystem or database access from writing the active
+	// pointer directly, and it cannot: this is a control on the
+	// workflow, not on the storage. Anyone claiming SoD end to end
+	// also has to lock down who can reach Postgres.
+	RequireApproval bool
 }
 
 // adminConfig is a tiny shim so the policy admin handlers can call
@@ -405,6 +424,18 @@ type activeResponse struct {
 	Active        policystore.Active `json:"active"`
 	CurrentDraft  *policystore.Draft `json:"current_draft,omitempty"`
 	PreviousDraft *policystore.Draft `json:"previous_draft,omitempty"`
+	// ProposedDraft is the draft awaiting approval, resolved so the
+	// console can name it without a second round-trip.
+	ProposedDraft *policystore.Draft `json:"proposed_draft,omitempty"`
+	// RequiresApproval reports whether this gateway refuses direct
+	// promotion.
+	//
+	// Reported rather than left for the console to assume, because a
+	// console that says "changes need a second approver" while the
+	// gateway would accept a direct promote is making a false
+	// assurance about a security control. The only honest source for
+	// that sentence is the gateway that would enforce it.
+	RequiresApproval bool `json:"requires_approval"`
 	// Source describes where the live policy came from. One of:
 	//   "embedded" — embedded default (no promote has happened)
 	//   "file"     — INTENTGATE_POLICY_FILE was set at startup
@@ -464,7 +495,11 @@ func NewAdminActiveGetHandler(cfg PolicyAdminConfig, startupSource string) http.
 			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
 			return
 		}
-		resp := activeResponse{Active: a, Source: startupSource}
+		resp := activeResponse{
+			Active:           a,
+			Source:           startupSource,
+			RequiresApproval: cfg.RequireApproval,
+		}
 		if a.CurrentDraftID != "" {
 			d, err := cfg.Store.GetDraft(r.Context(), a.CurrentDraftID)
 			if err == nil {
@@ -487,6 +522,12 @@ func NewAdminActiveGetHandler(cfg PolicyAdminConfig, startupSource string) http.
 			d, err := cfg.Store.GetDraft(r.Context(), a.PreviousDraftID)
 			if err == nil {
 				resp.PreviousDraft = &d
+			}
+		}
+		if a.ProposedDraftID != "" {
+			d, err := cfg.Store.GetDraft(r.Context(), a.ProposedDraftID)
+			if err == nil {
+				resp.ProposedDraft = &d
 			}
 		}
 		_ = json.NewEncoder(w).Encode(resp)
@@ -629,6 +670,19 @@ func NewAdminPromoteHandler(cfg PolicyAdminConfig) http.Handler {
 			return
 		}
 
+		// The separation-of-duties gate. Refused here rather than in
+		// the store so the operator gets an explanation and a route
+		// forward instead of a bare error, and so the store keeps a
+		// working direct Promote for deployments that have not turned
+		// this on.
+		if cfg.RequireApproval {
+			adminError(w, http.StatusConflict,
+				"this gateway requires a second operator to approve policy changes: "+
+					"POST /v1/admin/policies/propose, then have a different operator "+
+					"POST /v1/admin/policies/approve")
+			return
+		}
+
 		var body promoteBodyWithTenant
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
 		dec.DisallowUnknownFields()
@@ -728,6 +782,382 @@ func NewAdminPromoteHandler(cfg PolicyAdminConfig) http.Handler {
 			"active":      active,
 			"swapped":     true,
 			"promoted_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+}
+
+// proposeBody is the request shape for POST /v1/admin/policies/propose.
+type proposeBody struct {
+	DraftID    string `json:"draft_id"`
+	ProposedBy string `json:"proposed_by"`
+	Tenant     string `json:"tenant,omitempty"`
+}
+
+// approveBody is shared by approve and reject.
+type approveBody struct {
+	// ActedBy is the operator taking the action. Named neutrally
+	// because the same struct serves approve and reject, and calling
+	// it ApprovedBy on the reject path would put the wrong word in
+	// the client's request.
+	ActedBy string `json:"acted_by"`
+	Tenant  string `json:"tenant,omitempty"`
+}
+
+// resolvePolicyTenant applies the standard rule: a per-tenant admin
+// is pinned to their own tenant and gets 403 for disagreeing; a
+// superadmin is taken at their word, with empty meaning the
+// default-fallback slot. Returns ok=false once it has written the
+// error response.
+func resolvePolicyTenant(w http.ResponseWriter, auth adminAuth, bodyTenant string) (string, bool) {
+	tenant := strings.TrimSpace(bodyTenant)
+	if auth.tenant != "" {
+		if tenant != "" && tenant != auth.tenant {
+			adminError(w, http.StatusForbidden,
+				"tenant in body does not match admin token's tenant")
+			return "", false
+		}
+		tenant = auth.tenant
+	}
+	return tenant, true
+}
+
+// NewAdminProposeHandler returns POST /v1/admin/policies/propose.
+//
+// Records a draft as awaiting approval. Nothing on the request path
+// changes: the gateway carries on running whatever is currently
+// active, and no engine is swapped. That is the whole point of the
+// step — it exists so promotion is not one action by one person.
+//
+// The Rego is still compiled here, before the proposal is recorded.
+// Finding out a policy does not compile at approval time would make
+// the approver's job "click and hope", and would let a proposal sit
+// in the queue looking ready when it could never have gone live.
+func NewAdminProposeHandler(cfg PolicyAdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Audit == nil {
+		cfg.Audit = audit.NewNullEmitter()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg.adminConfig())
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+		if cfg.Store == nil {
+			adminError(w, http.StatusServiceUnavailable, "policy store not configured")
+			return
+		}
+
+		var body proposeBody
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			adminError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(body.DraftID) == "" {
+			adminError(w, http.StatusBadRequest, "draft_id is required")
+			return
+		}
+		if strings.TrimSpace(body.ProposedBy) == "" {
+			adminError(w, http.StatusBadRequest,
+				"proposed_by is required: an approval can only show that two people "+
+					"were involved if both are named")
+			return
+		}
+
+		tenant, ok := resolvePolicyTenant(w, auth, body.Tenant)
+		if !ok {
+			return
+		}
+
+		d, err := cfg.Store.GetDraft(r.Context(), body.DraftID)
+		if errors.Is(err, policystore.ErrNotFound) {
+			adminError(w, http.StatusNotFound, "draft not found")
+			return
+		}
+		if err != nil {
+			cfg.Logger.Error("propose get draft failed", "err", err, "id", body.DraftID)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+		if auth.tenant != "" && d.Tenant != auth.tenant {
+			adminError(w, http.StatusNotFound, "draft not found")
+			return
+		}
+		if _, err := policy.NewEngine(r.Context(), d.RegoSource); err != nil {
+			adminError(w, http.StatusBadRequest, "rego compile error: "+err.Error())
+			return
+		}
+
+		active, err := cfg.Store.Propose(r.Context(), body.DraftID, strings.TrimSpace(body.ProposedBy), tenant)
+		if errors.Is(err, policystore.ErrNotFound) {
+			adminError(w, http.StatusNotFound, "draft not found")
+			return
+		}
+		if errors.Is(err, policystore.ErrUnidentified) {
+			adminError(w, http.StatusBadRequest, "proposed_by is required")
+			return
+		}
+		if err != nil {
+			cfg.Logger.Error("propose failed", "err", err, "id", body.DraftID)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+
+		ev := audit.NewEvent(audit.DecisionAllow, "admin/propose_policy")
+		ev.Check = audit.CheckPolicy
+		ev.Reason = "policy proposed for approval: tenant=" + tenant +
+			" draft=" + body.DraftID +
+			" by=" + strings.TrimSpace(body.ProposedBy)
+		ev.Tenant = tenant
+		ev.RemoteIP = r.RemoteAddr
+		ev.ElevationID = resolveElevationID(r)
+		cfg.Audit.Emit(r.Context(), ev)
+
+		cfg.Logger.Info("policy proposed",
+			"tenant", tenant, "draft_id", body.DraftID,
+			"proposed_by", strings.TrimSpace(body.ProposedBy))
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active":   active,
+			"swapped":  false,
+			"proposed": true,
+		})
+	})
+}
+
+// NewAdminApproveHandler returns POST /v1/admin/policies/approve.
+//
+// Promotes the pending proposal, provided the approver is not the
+// operator who proposed it. This is the endpoint the whole feature
+// exists for; the 409 it returns on self-approval is the control.
+//
+// Compile happens before the store call for the same reason it does
+// on promote: a failure must leave the gateway running the previous
+// policy rather than pointing at Rego that will not load.
+func NewAdminApproveHandler(cfg PolicyAdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Audit == nil {
+		cfg.Audit = audit.NewNullEmitter()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg.adminConfig())
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+		if cfg.Store == nil {
+			adminError(w, http.StatusServiceUnavailable, "policy store not configured")
+			return
+		}
+		if cfg.Reloader == nil {
+			adminError(w, http.StatusServiceUnavailable,
+				"policy reloader not configured; gateway cannot hot-swap policies in this deployment")
+			return
+		}
+
+		var body approveBody
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			adminError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		approver := strings.TrimSpace(body.ActedBy)
+		if approver == "" {
+			adminError(w, http.StatusBadRequest,
+				"acted_by is required: an unnamed approver cannot evidence a second pair of eyes")
+			return
+		}
+
+		tenant, ok := resolvePolicyTenant(w, auth, body.Tenant)
+		if !ok {
+			return
+		}
+
+		// Read the pending proposal so its Rego can be compiled
+		// before the store promotes it. The store re-checks the
+		// proposer under its own lock, so this read is for the
+		// compile only — the decision is not made here.
+		pending, err := cfg.Store.GetActive(r.Context(), tenant)
+		if err != nil {
+			cfg.Logger.Error("approve read active failed", "err", err, "tenant", tenant)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+		if pending.ProposedDraftID == "" {
+			adminError(w, http.StatusNotFound, "no policy is awaiting approval")
+			return
+		}
+		d, err := cfg.Store.GetDraft(r.Context(), pending.ProposedDraftID)
+		if errors.Is(err, policystore.ErrNotFound) {
+			adminError(w, http.StatusNotFound,
+				"the proposed draft has been deleted; propose a new one")
+			return
+		}
+		if err != nil {
+			cfg.Logger.Error("approve get draft failed", "err", err)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+		newEngine, err := policy.NewEngine(r.Context(), d.RegoSource)
+		if err != nil {
+			adminError(w, http.StatusBadRequest, "rego compile error: "+err.Error())
+			return
+		}
+
+		active, err := cfg.Store.Approve(r.Context(), approver, tenant)
+		switch {
+		case errors.Is(err, policystore.ErrSelfApproval):
+			// 409, not 403: the caller is allowed to approve policies
+			// in general, just not this one. The distinction matters
+			// to whoever reads the log.
+			adminError(w, http.StatusConflict,
+				"a policy cannot be approved by the operator who proposed it; "+
+					"a different operator must approve this change")
+			return
+		case errors.Is(err, policystore.ErrNoProposal):
+			adminError(w, http.StatusNotFound, "no policy is awaiting approval")
+			return
+		case errors.Is(err, policystore.ErrUnidentified):
+			adminError(w, http.StatusConflict,
+				"the pending proposal has no recorded proposer, so a second operator "+
+					"cannot be evidenced; propose the draft again")
+			return
+		case errors.Is(err, policystore.ErrNotFound):
+			adminError(w, http.StatusNotFound,
+				"the proposed draft has been deleted; propose a new one")
+			return
+		case err != nil:
+			cfg.Logger.Error("approve failed", "err", err, "tenant", tenant)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+
+		if _, swapErr := cfg.Reloader.SwapFor(tenant, newEngine); swapErr != nil {
+			cfg.Logger.Error("reloader swap failed after approve",
+				"err", swapErr, "id", active.CurrentDraftID, "tenant", tenant)
+			adminError(w, http.StatusInternalServerError,
+				"approval recorded but engine swap failed: "+swapErr.Error())
+			return
+		}
+
+		// Both names on the event. An approval record naming only one
+		// operator is indistinguishable from a direct promote, which
+		// would make the audit trail useless for the exact question
+		// this feature exists to answer.
+		ev := audit.NewEvent(audit.DecisionAllow, "admin/approve_policy")
+		ev.Check = audit.CheckPolicy
+		ev.Reason = "policy approved and promoted: tenant=" + tenant +
+			" draft=" + active.CurrentDraftID +
+			" prior=" + active.PreviousDraftID +
+			" proposed_by=" + active.PromotedBy +
+			" approved_by=" + approver
+		ev.Tenant = tenant
+		ev.RemoteIP = r.RemoteAddr
+		ev.ElevationID = resolveElevationID(r)
+		cfg.Audit.Emit(r.Context(), ev)
+
+		cfg.Logger.Info("policy approved and promoted",
+			"tenant", tenant, "draft_id", active.CurrentDraftID,
+			"previous_draft_id", active.PreviousDraftID,
+			"proposed_by", active.PromotedBy, "approved_by", approver)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active":      active,
+			"swapped":     true,
+			"promoted_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+}
+
+// NewAdminRejectHandler returns POST /v1/admin/policies/reject.
+//
+// Discards the pending proposal. Nothing is promoted and no engine
+// is swapped. The proposer may reject their own: withdrawing a
+// request is not an escalation, and requiring a second person to
+// clear it would leave abandoned proposals in the queue.
+func NewAdminRejectHandler(cfg PolicyAdminConfig) http.Handler {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	if cfg.Audit == nil {
+		cfg.Audit = audit.NewNullEmitter()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		auth := resolveAdminAuth(r, cfg.adminConfig())
+		if !auth.ok {
+			adminError(w, http.StatusUnauthorized, "invalid or missing admin token")
+			return
+		}
+		if cfg.Store == nil {
+			adminError(w, http.StatusServiceUnavailable, "policy store not configured")
+			return
+		}
+
+		var body approveBody
+		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			adminError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+			return
+		}
+		rejector := strings.TrimSpace(body.ActedBy)
+		if rejector == "" {
+			adminError(w, http.StatusBadRequest, "acted_by is required")
+			return
+		}
+
+		tenant, ok := resolvePolicyTenant(w, auth, body.Tenant)
+		if !ok {
+			return
+		}
+
+		// Captured before the reject clears it, so the audit event can
+		// say what was turned down rather than just that something was.
+		before, _ := cfg.Store.GetActive(r.Context(), tenant)
+
+		active, err := cfg.Store.RejectProposal(r.Context(), rejector, tenant)
+		if errors.Is(err, policystore.ErrNoProposal) {
+			adminError(w, http.StatusNotFound, "no policy is awaiting approval")
+			return
+		}
+		if err != nil {
+			cfg.Logger.Error("reject failed", "err", err, "tenant", tenant)
+			adminError(w, http.StatusServiceUnavailable, "store error: "+err.Error())
+			return
+		}
+
+		ev := audit.NewEvent(audit.DecisionBlock, "admin/reject_policy")
+		ev.Check = audit.CheckPolicy
+		ev.Reason = "proposed policy rejected: tenant=" + tenant +
+			" draft=" + before.ProposedDraftID +
+			" proposed_by=" + before.ProposedBy +
+			" rejected_by=" + rejector
+		ev.Tenant = tenant
+		ev.RemoteIP = r.RemoteAddr
+		ev.ElevationID = resolveElevationID(r)
+		cfg.Audit.Emit(r.Context(), ev)
+
+		cfg.Logger.Info("proposed policy rejected",
+			"tenant", tenant, "draft_id", before.ProposedDraftID,
+			"proposed_by", before.ProposedBy, "rejected_by", rejector)
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"active":   active,
+			"swapped":  false,
+			"rejected": true,
 		})
 	})
 }

@@ -288,10 +288,121 @@ func (s *MemoryStore) Promote(_ context.Context, draftID, promotedBy, tenant str
 		PreviousDraftID: current.CurrentDraftID,
 		PromotedAt:      time.Now().UTC(),
 		PromotedBy:      promotedBy,
+		// A direct promote carries no approval, so ApprovedBy is
+		// left empty rather than inherited from whatever was
+		// approved before. Carrying it forward would attach a real
+		// person's name to a change they never saw.
+		//
+		// Any pending proposal survives: it is a record of what
+		// someone asked for, and a third operator promoting
+		// something else does not withdraw that request.
+		ProposedDraftID: current.ProposedDraftID,
+		ProposedBy:      current.ProposedBy,
+		ProposedAt:      current.ProposedAt,
 	}
 	s.active[tenant] = next
 	s.notifyWatchers(next)
 	return next, nil
+}
+
+// Propose records draftID as awaiting approval for the tenant,
+// leaving the active pointer alone. Validates the draft inside the
+// critical section for the same reason Promote does.
+//
+// Note that a pending proposal is deliberately NOT cleared by a
+// direct Promote. The two paths are independent, and silently
+// dropping someone's proposal because a third operator promoted
+// something else would lose a record of what was asked for. The
+// proposal stays pending against whatever is current now, and its
+// approver will see it.
+func (s *MemoryStore) Propose(_ context.Context, draftID, proposedBy, tenant string) (Active, error) {
+	if proposedBy == "" {
+		return Active{}, ErrUnidentified
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.drafts[draftID]; !ok {
+		return Active{}, ErrNotFound
+	}
+	next := s.active[tenant]
+	next.Tenant = tenant
+	next.ProposedDraftID = draftID
+	next.ProposedBy = proposedBy
+	next.ProposedAt = time.Now().UTC()
+	s.active[tenant] = next
+	// No notifyWatchers: nothing on the request path changed. A
+	// replica waking up to recompile because someone SUGGESTED a
+	// policy would be reacting to a change that has not happened.
+	return next, nil
+}
+
+// Approve promotes the pending proposal if the approver is not the
+// proposer. The check and the promotion happen under one lock, so a
+// re-propose cannot land between them and swap the draft that was
+// vetted for a different one.
+func (s *MemoryStore) Approve(_ context.Context, approvedBy, tenant string) (Active, error) {
+	if approvedBy == "" {
+		return Active{}, ErrUnidentified
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.active[tenant]
+	if current.ProposedDraftID == "" {
+		return Active{}, ErrNoProposal
+	}
+	if current.ProposedBy == "" {
+		// Belt and braces: Propose refuses anonymous proposers, so
+		// this row could only come from an older schema or a direct
+		// write. Approving it would record a second party we cannot
+		// name, which is the thing this whole flow exists to avoid.
+		return Active{}, ErrUnidentified
+	}
+	if current.ProposedBy == approvedBy {
+		return Active{}, ErrSelfApproval
+	}
+	if _, ok := s.drafts[current.ProposedDraftID]; !ok {
+		// The proposed draft was deleted while pending.
+		return Active{}, ErrNotFound
+	}
+
+	next := Active{
+		Tenant:          tenant,
+		CurrentDraftID:  current.ProposedDraftID,
+		PreviousDraftID: current.CurrentDraftID,
+		PromotedAt:      time.Now().UTC(),
+		// PromotedBy stays the proposer: they are the one who
+		// authored the change. ApprovedBy is the second signature.
+		// Overwriting PromotedBy with the approver would erase who
+		// asked for it and leave the record showing one name again.
+		PromotedBy: current.ProposedBy,
+		ApprovedBy: approvedBy,
+	}
+	s.active[tenant] = next
+	s.notifyWatchers(next)
+	return next, nil
+}
+
+// RejectProposal clears the pending proposal. The proposer may
+// reject their own, so there is no identity check beyond needing
+// something to reject.
+func (s *MemoryStore) RejectProposal(_ context.Context, _ string, tenant string) (Active, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.active[tenant]
+	if current.ProposedDraftID == "" {
+		return Active{}, ErrNoProposal
+	}
+	current.Tenant = tenant
+	current.ProposedDraftID = ""
+	current.ProposedBy = ""
+	current.ProposedAt = time.Time{}
+	s.active[tenant] = current
+	return current, nil
 }
 
 // Rollback swaps Current and Previous for the given tenant, then
@@ -313,6 +424,14 @@ func (s *MemoryStore) Rollback(_ context.Context, rolledBackBy, tenant string) (
 		PreviousDraftID: "", // one-step rollback; clear to avoid ping-pong
 		PromotedAt:      time.Now().UTC(),
 		PromotedBy:      rolledBackBy,
+		// ApprovedBy is deliberately not restored. The store keeps
+		// one approver, attached to the change that is live; it does
+		// not keep an approval per version. Whoever approved this
+		// draft the first time is in the audit log, not here, and
+		// guessing would put a name against the wrong event.
+		ProposedDraftID: current.ProposedDraftID,
+		ProposedBy:      current.ProposedBy,
+		ProposedAt:      current.ProposedAt,
 	}
 	s.active[tenant] = next
 	s.notifyWatchers(next)

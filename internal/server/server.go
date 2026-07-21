@@ -248,6 +248,16 @@ type Config struct {
 	// GET /v1/admin/policies/active so the console can render a
 	// badge keyed off the source.
 	PolicySource string
+
+	// RequirePolicyApproval closes the direct-promote path so a draft
+	// can only reach production via propose → approve by a second
+	// operator. Set from INTENTGATE_POLICY_REQUIRE_APPROVAL.
+	//
+	// Off by default: switching it on for every deployment at upgrade
+	// would break the promote call estates already automate, and a
+	// control that arrives unannounced and breaks a pipeline gets
+	// turned off rather than adopted.
+	RequirePolicyApproval bool
 }
 
 // New constructs an *http.Server with all gateway routes and middleware.
@@ -463,12 +473,13 @@ func New(cfg Config) *http.Server {
 		// console can show "feature not enabled" rather than 404).
 		if cfg.PolicyStore != nil {
 			policyAdminCfg := handlers.PolicyAdminConfig{
-				Logger:       logger,
-				AdminToken:   cfg.AdminToken,
-				TenantAdmins: cfg.TenantAdmins,
-				Store:        cfg.PolicyStore,
-				Reloader:     cfg.PolicyReloader,
-				Audit:        cfg.Audit,
+				Logger:          logger,
+				AdminToken:      cfg.AdminToken,
+				TenantAdmins:    cfg.TenantAdmins,
+				Store:           cfg.PolicyStore,
+				Reloader:        cfg.PolicyReloader,
+				Audit:           cfg.Audit,
+				RequireApproval: cfg.RequirePolicyApproval,
 			}
 			mux.Handle("GET /v1/admin/policies/drafts", handlers.NewAdminDraftsListHandler(policyAdminCfg))
 			mux.Handle("POST /v1/admin/policies/drafts", handlers.NewAdminDraftsCreateHandler(policyAdminCfg))
@@ -479,6 +490,15 @@ func New(cfg Config) *http.Server {
 			mux.Handle("POST /v1/admin/policies/active", handlers.NewAdminPromoteHandler(policyAdminCfg))
 			mux.Handle("DELETE /v1/admin/policies/active", handlers.NewAdminActiveDeleteHandler(policyAdminCfg))
 			mux.Handle("POST /v1/admin/policies/rollback", handlers.NewAdminRollbackHandler(policyAdminCfg))
+			// Separation of duties on promotion. Registered whether or
+			// not RequirePolicyApproval is on: an estate should be
+			// able to route changes through review before it makes
+			// review compulsory, and turning the flag on later then
+			// changes nothing about how the console talks to the
+			// gateway.
+			mux.Handle("POST /v1/admin/policies/propose", handlers.NewAdminProposeHandler(policyAdminCfg))
+			mux.Handle("POST /v1/admin/policies/approve", handlers.NewAdminApproveHandler(policyAdminCfg))
+			mux.Handle("POST /v1/admin/policies/reject", handlers.NewAdminRejectHandler(policyAdminCfg))
 		}
 	}
 
