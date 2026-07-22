@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Per-tool upstream credential brokering admin API.
@@ -59,6 +60,11 @@ func NewAdminCredentialsSetHandler(cfg AdminConfig) http.Handler {
 		var body struct {
 			Tool       string `json:"tool"`
 			Credential string `json:"credential"`
+			// Optional governance metadata. Owner is the accountable
+			// human/team for the secret; ExpiresAt (RFC3339) is when it
+			// should be rotated by. Both are advisory and never the secret.
+			Owner     string `json:"owner"`
+			ExpiresAt string `json:"expires_at"`
 		}
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<16))
 		dec.DisallowUnknownFields()
@@ -70,7 +76,16 @@ func NewAdminCredentialsSetHandler(cfg AdminConfig) http.Handler {
 			adminError(w, http.StatusBadRequest, "tool is required")
 			return
 		}
-		if err := cfg.Credentials.Set(r.Context(), body.Tool, body.Credential); err != nil {
+		var expiresAt time.Time
+		if s := strings.TrimSpace(body.ExpiresAt); s != "" {
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				adminError(w, http.StatusBadRequest, "expires_at must be RFC3339: "+err.Error())
+				return
+			}
+			expiresAt = t
+		}
+		if err := cfg.Credentials.SetMeta(r.Context(), body.Tool, body.Credential, body.Owner, expiresAt); err != nil {
 			// Most failures are a malformed credential ("Header: value");
 			// surface the message as a 400. The secret itself is never logged.
 			cfg.Logger.Warn("set upstream credential failed", "tool", body.Tool, "err", err)
