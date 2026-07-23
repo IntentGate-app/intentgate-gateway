@@ -154,6 +154,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1071,10 +1072,16 @@ func main() {
 	// decision, which has already been made and audited by the time a rollup is
 	// built. The control plane pushes policy DOWN over its own path; this loop is
 	// telemetry UP only.
-	if fedReporter := federation.NewReporter(
+	fedReporter := federation.NewReporter(
 		envOr("INTENTGATE_FEDERATION_CONTROL_URL", ""),
 		envOr("INTENTGATE_FEDERATION_TOKEN", ""),
-	); fedReporter.Enabled() {
+	)
+	// Air-gapped nodes cannot reach a control plane; when a rollup directory is
+	// configured, each signed rollup is written there as a file for an operator
+	// to carry out on media and import at the console. The push loop runs when
+	// EITHER a control URL or a rollup directory is set.
+	fedRollupDir := envOr("INTENTGATE_FEDERATION_ROLLUP_DIR", "")
+	if fedReporter.Enabled() || fedRollupDir != "" {
 		nodeID := envOr("INTENTGATE_NODE_ID", "")
 		fedTenant := envOr("INTENTGATE_FEDERATION_TENANT", "")
 		// Dedicated per-node signing key, established at node join. It is
@@ -1082,6 +1089,8 @@ func main() {
 		// this to verify rollup integrity but must never hold the key that mints
 		// tokens. When unset, rollups are pushed unsigned and the control plane
 		// records them as unverified -- signing is a hardening layer, not a gate.
+		// For an air-gapped node the signing key is what makes an imported file
+		// trustworthy, so a rollup directory should always be paired with one.
 		fedSigningKey := []byte(envOr("INTENTGATE_FEDERATION_SIGNING_KEY", ""))
 		fedInterval := 60 * time.Second
 		if v := envOr("INTENTGATE_FEDERATION_INTERVAL_S", ""); v != "" {
@@ -1091,16 +1100,48 @@ func main() {
 		}
 		switch {
 		case nodeID == "":
-			logger.Error("federation control url set but INTENTGATE_NODE_ID is empty; federation push disabled")
+			logger.Error("federation enabled but INTENTGATE_NODE_ID is empty; federation push disabled")
 		case auditStore == nil:
-			logger.Error("federation control url set but no audit store configured; federation push disabled")
+			logger.Error("federation enabled but no audit store configured; federation push disabled")
 		default:
-			go runFederationPush(watchCtx, logger, fedReporter, auditStore, fedSigningKey, nodeID, fedTenant, fedInterval)
+			go runFederationPush(watchCtx, logger, fedReporter, fedRollupDir, auditStore, fedSigningKey, nodeID, fedTenant, fedInterval)
 			logger.Info("federation push enabled",
 				"node_id", nodeID, "tenant", fedTenant,
 				"url", envOr("INTENTGATE_FEDERATION_CONTROL_URL", ""),
+				"rollup_dir", fedRollupDir,
+				"air_gapped", !fedReporter.Enabled() && fedRollupDir != "",
 				"signed", len(fedSigningKey) > 0,
 				"interval_s", int(fedInterval/time.Second))
+		}
+	}
+
+	// Optional: FEDERATION directive poll (policy DOWN). The control plane can
+	// broadcast a global "STOP ALL AGENTS" -- or a per-domain stop -- from one
+	// console across every environment. This node polls for its directive over
+	// the same outbound path it opens itself; when the directive says stop it
+	// engages its LOCAL kill switch, when it clears it releases the kill it set.
+	// A signed directive is verified against the node signing key; an unsigned
+	// or mis-signed command is ignored (fail safe). A fetch failure keeps the
+	// current state -- losing the control plane never silently releases a stop.
+	if durl := envOr("INTENTGATE_FEDERATION_DIRECTIVE_URL", ""); durl != "" {
+		dToken := envOr("INTENTGATE_FEDERATION_TOKEN", "")
+		dKey := []byte(envOr("INTENTGATE_FEDERATION_SIGNING_KEY", ""))
+		dNode := envOr("INTENTGATE_NODE_ID", "")
+		dInterval := 15 * time.Second
+		if v := envOr("INTENTGATE_FEDERATION_DIRECTIVE_INTERVAL_S", ""); v != "" {
+			if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+				dInterval = time.Duration(n) * time.Second
+			}
+		}
+		switch {
+		case dToken == "":
+			logger.Error("federation directive url set but INTENTGATE_FEDERATION_TOKEN is empty; directive poll disabled")
+		case killSwitchStore == nil:
+			logger.Error("federation directive url set but no kill switch configured; directive poll disabled")
+		default:
+			go runFederationDirectivePoll(watchCtx, logger, durl, dToken, dKey, dNode, dInterval, killSwitchStore)
+			logger.Info("federation directive poll enabled",
+				"url", durl, "interval_s", int(dInterval/time.Second), "signed", len(dKey) > 0)
 		}
 	}
 
@@ -1273,7 +1314,7 @@ func envOr(key, fallback string) string {
 // node's recent decision activity to the control plane. It never blocks the
 // request path; on any failure the window still advances so a transient
 // control-plane outage self-heals on the next tick rather than backing up.
-func runFederationPush(ctx context.Context, logger *slog.Logger, reporter *federation.Reporter, store auditstore.Store, signingKey []byte, nodeID, tenant string, interval time.Duration) {
+func runFederationPush(ctx context.Context, logger *slog.Logger, reporter *federation.Reporter, rollupDir string, store auditstore.Store, signingKey []byte, nodeID, tenant string, interval time.Duration) {
 	windowStart := time.Now().Add(-interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1299,16 +1340,42 @@ func runFederationPush(ctx context.Context, logger *slog.Logger, reporter *feder
 					continue
 				}
 			}
-			if pushErr := reporter.Push(ctx, rollup); pushErr != nil {
-				logger.Warn("federation rollup push failed", "err", pushErr, "samples", len(samples))
-			} else {
-				logger.Info("federation rollup pushed",
-					"node_id", nodeID, "samples", len(samples),
-					"allow", agg.Decisions.Allow, "hold", agg.Decisions.Hold, "deny", agg.Decisions.Deny)
+			if reporter.Enabled() {
+				if pushErr := reporter.Push(ctx, rollup); pushErr != nil {
+					logger.Warn("federation rollup push failed", "err", pushErr, "samples", len(samples))
+				} else {
+					logger.Info("federation rollup pushed",
+						"node_id", nodeID, "samples", len(samples),
+						"allow", agg.Decisions.Allow, "hold", agg.Decisions.Hold, "deny", agg.Decisions.Deny)
+				}
+			}
+			if rollupDir != "" {
+				if writeErr := writeFederationRollupFile(rollupDir, nodeID, to, rollup); writeErr != nil {
+					logger.Warn("federation rollup file write failed", "err", writeErr, "dir", rollupDir)
+				} else {
+					logger.Info("federation rollup written for offline import", "node_id", nodeID, "dir", rollupDir)
+				}
 			}
 			windowStart = to
 		}
 	}
+}
+
+// writeFederationRollupFile writes a signed rollup as JSON into dir for an
+// air-gapped node's operator to carry out and import at the console. The
+// filename is the node id plus the window-end timestamp so files sort by time
+// and never collide.
+func writeFederationRollupFile(dir, nodeID string, windowEnd time.Time, rollup federation.Rollup) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(rollup, "", "  ")
+	if err != nil {
+		return err
+	}
+	safeNode := strings.ReplaceAll(nodeID, "/", "_")
+	name := fmt.Sprintf("%s-%s.json", safeNode, windowEnd.UTC().Format("20060102T150405Z"))
+	return os.WriteFile(filepath.Join(dir, name), body, 0o644)
 }
 
 // collectFederationSamples pages the audit store over [from, to) and reduces each
@@ -1347,6 +1414,69 @@ func collectFederationSamples(ctx context.Context, store auditstore.Store, tenan
 		}
 	}
 	return samples, nil
+}
+
+// runFederationDirectivePoll polls the control plane for this node's directive
+// and applies a global STOP to the LOCAL kill switch. It only manages the kill
+// it set itself (fedEngaged): it will not release a kill an operator engaged
+// locally. A fetch failure keeps current state -- losing the control plane must
+// never silently release a stop. A signed directive is verified against the
+// node signing key; an unsigned or mis-signed command is ignored (fail safe).
+func runFederationDirectivePoll(ctx context.Context, logger *slog.Logger, url, token string, signingKey []byte, nodeID string, interval time.Duration, ks killswitch.Store) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	fedEngaged := false
+	poll := func() {
+		d, ok, err := federation.FetchDirective(ctx, client, url, token)
+		if err != nil {
+			logger.Warn("federation directive poll failed; keeping current kill-switch state", "err", err)
+			return
+		}
+		if !ok {
+			// No directive configured. Absence is not an instruction to release.
+			return
+		}
+		if d.NodeID != "" && nodeID != "" && d.NodeID != nodeID {
+			logger.Warn("federation directive addressed to a different node; ignoring", "directive_node", d.NodeID)
+			return
+		}
+		if len(signingKey) > 0 {
+			if okSig, why := federation.VerifyDirective(d, signingKey); !okSig {
+				logger.Warn("federation directive failed signature verification; ignoring", "reason", why)
+				return
+			}
+		}
+		switch {
+		case d.Stop && !fedEngaged:
+			reason := d.Reason
+			if reason == "" {
+				reason = "control-plane directive"
+			}
+			if err := ks.Engage(ctx, killswitch.Entry{Type: killswitch.ScopeGlobal, Reason: "federation: " + reason}); err != nil {
+				logger.Error("federation directive: kill-switch engage failed", "err", err)
+				return
+			}
+			fedEngaged = true
+			logger.Warn("federation directive: GLOBAL KILL ENGAGED", "scope", d.Scope, "reason", d.Reason, "seq", d.Seq)
+		case !d.Stop && fedEngaged:
+			if err := ks.Release(ctx, killswitch.ScopeGlobal, "", ""); err != nil {
+				logger.Error("federation directive: kill-switch release failed", "err", err)
+				return
+			}
+			fedEngaged = false
+			logger.Info("federation directive: global kill released", "seq", d.Seq)
+		}
+	}
+	poll()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			poll()
+		}
+	}
 }
 
 // splitCSV parses a comma-separated env value into a trimmed string
