@@ -148,6 +148,16 @@ const (
 	// gateway then applies the recorded decision instead of enqueuing a
 	// duplicate. In the default synchronous mode this code is never sent.
 	CodeApprovalPending = -32019
+	// CodeToolSchemaBlocked is returned when the inbound tool-schema sanitizer
+	// refuses a poisoned tool definition (internal/toolschema).
+	CodeToolSchemaBlocked = -32020
+	// CodeVelocityExceeded is returned when a runtime velocity or monetary cap
+	// is exceeded in the window (internal/velocity).
+	CodeVelocityExceeded = -32021
+	// CodeSessionRewound is returned in place of a raw error when a blocked call
+	// triggers self-healing session rewind; the `data` payload carries the
+	// signed recovery envelope (internal/sessionrewind).
+	CodeSessionRewound = -32022
 )
 
 // NewErrorResponse builds a JSON-RPC 2.0 error response.

@@ -125,6 +125,18 @@ const (
 	// Healthy calls produce no audit row from this stage — the
 	// downstream upstream check already records every forward.
 	CheckFaultIsolation Check = "fault_isolation"
+	// CheckToolSchema is the inbound tool-schema sanitizer (tool-poisoning
+	// defense). Emitted when an inbound tool definition is sanitized (stripped),
+	// held for drift review, or blocked as poisoned. See internal/toolschema.
+	CheckToolSchema Check = "tool_schema"
+	// CheckVelocity is the runtime velocity / monetary circuit breaker. Emitted
+	// when a call is refused for exceeding a per-window rate or spend cap. See
+	// internal/velocity.
+	CheckVelocity Check = "velocity"
+	// CheckSessionRewind is the self-healing session rewind. Emitted when a
+	// blocked call triggers a rollback to the last verified-safe checkpoint and
+	// a signed recovery envelope is issued. See internal/sessionrewind.
+	CheckSessionRewind Check = "session_rewind"
 )
 
 // Event is the on-the-wire audit record.
