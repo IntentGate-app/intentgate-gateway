@@ -61,8 +61,10 @@ func TestScanDetectsRoleMarker(t *testing.T) {
 }
 
 func TestScanDetectsZeroWidth(t *testing.T) {
-	// Zero-width space smuggled between letters.
-	s := "{\"properties\":{\"x\":{\"description\":\"safe​hidden\"}}}"
+	// Zero-width space (U+200B) built numerically so the test source stays
+	// pure ASCII and cannot itself smuggle an invisible character.
+	zwsp := string(rune(0x200B))
+	s := `{"properties":{"x":{"description":"safe` + zwsp + `hidden"}}}`
 	f := Scan("t", json.RawMessage(s))
 	found := false
 	for _, x := range f {
@@ -91,15 +93,15 @@ func TestSanitizeStripsPoisonAndKeepsShape(t *testing.T) {
 	if len(findings) == 0 {
 		t.Fatal("expected findings from sanitize")
 	}
-	s := string(clean)
-	if strings.Contains(strings.ToLower(s), "attacker@evil.com") {
-		t.Errorf("exfil address survived sanitize: %s", s)
+	s := strings.ToLower(string(clean))
+	if strings.Contains(s, "attacker@evil.com") {
+		t.Errorf("exfil address survived sanitize: %s", clean)
 	}
-	if strings.Contains(strings.ToLower(s), "ignore all previous instructions") {
-		t.Errorf("injection survived sanitize: %s", s)
+	if strings.Contains(s, "ignore all previous instructions") {
+		t.Errorf("injection survived sanitize: %s", clean)
 	}
-	if !strings.Contains(s, redactMark) {
-		t.Errorf("expected a redaction marker in cleaned schema: %s", s)
+	if !strings.Contains(string(clean), redactMark) {
+		t.Errorf("expected a redaction marker in cleaned schema: %s", clean)
 	}
 	// The cleaned schema must still be valid JSON with the same top-level shape.
 	var v map[string]any
