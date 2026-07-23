@@ -103,8 +103,8 @@ type Decoy struct {
 // Response action identifiers carried on a decoy. Kept as plain strings on
 // the wire so the console owns the vocabulary; the handler matches these.
 const (
-	ActionNotifySOC       = "notify_soc"
-	ActionCaptureSession  = "capture_session"
+	ActionNotifySOC      = "notify_soc"
+	ActionCaptureSession = "capture_session"
 )
 
 // HasResponseAction reports whether the decoy requests the named extra

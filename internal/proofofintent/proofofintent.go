@@ -54,7 +54,7 @@ type Bundle struct {
 	Subject     string  `json:"subject"` // decision id or session id this bundle proves
 	GeneratedAt string  `json:"generated_at"`
 	Entries     []Entry `json:"entries"`
-	KeyID       string  `json:"key_id"`             // identifier of the signing key, never the key itself
+	KeyID       string  `json:"key_id"`              // identifier of the signing key, never the key itself
 	Signature   string  `json:"signature,omitempty"` // hex HMAC-SHA256 over the bundle sans this field
 }
 
