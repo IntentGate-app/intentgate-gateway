@@ -412,7 +412,9 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			}
 			h.cfg.Logger.Info("mcp tools/call sandboxed",
 				"tool", params.Name, "check", "deception", "agent", capResult.agentID,
-				"decoy", dRes.Decoy.Name, "reason", dRes.Reason)
+				"decoy", dRes.Decoy.Name,
+				"response_actions", strings.Join(dRes.ResponseActions, ","),
+				"reason", dRes.Reason)
 			// Audited as escalate, not block: the agent WAS served a
 			// (synthetic) result, so "block" would misstate what happened.
 			// Escalate is the honest verdict — the decoy touch is flagged
@@ -464,7 +466,9 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			}
 			h.cfg.Logger.Info("mcp tools/call blocked",
 				"tool", params.Name, "check", "deception", "agent", capResult.agentID,
-				"decoy", dRes.Decoy.Name, "action", string(dRes.Action), "reason", dRes.Reason)
+				"decoy", dRes.Decoy.Name, "action", string(dRes.Action),
+				"response_actions", strings.Join(dRes.ResponseActions, ","),
+				"reason", dRes.Reason)
 			h.emitAudit(ctx, r, params, capResult, intResult,
 				audit.DecisionBlock, audit.CheckDeception, dRes.Reason, start, 0)
 			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,

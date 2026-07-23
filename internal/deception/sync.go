@@ -39,7 +39,9 @@ func (s *SyncRegistry) set(decoys []Decoy) {
 
 // FetchDecoys pulls the active decoy set from the console export endpoint
 // (GET, bearer-authenticated). The response shape is
-// {"decoys":[{"id","name","kind","key","pillar","on_trip"}]}.
+// {"decoys":[{"id","name","kind","key","pillar","on_trip","synthetic"}]}.
+// "synthetic" carries the fake payload a sandbox decoy serves; it
+// deserializes into Decoy.Synthetic and is empty for tripwire decoys.
 func FetchDecoys(ctx context.Context, client *http.Client, url, token string) ([]Decoy, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -93,6 +93,29 @@ type Decoy struct {
 	// record, a fake secret) whose only job is to keep the agent acting so
 	// its next move is observed. Empty for non-sandbox decoys.
 	Synthetic string `json:"synthetic,omitempty"`
+	// ResponseActions are extra side-effects to run on a trip, on top of the
+	// on-trip posture: "notify_soc" (emit to the webhook sink),
+	// "capture_session" (retain the touching call's payload). Empty means
+	// none beyond the posture. Unknown values are ignored.
+	ResponseActions []string `json:"response_actions,omitempty"`
+}
+
+// Response action identifiers carried on a decoy. Kept as plain strings on
+// the wire so the console owns the vocabulary; the handler matches these.
+const (
+	ActionNotifySOC       = "notify_soc"
+	ActionCaptureSession  = "capture_session"
+)
+
+// HasResponseAction reports whether the decoy requests the named extra
+// side-effect on a trip.
+func (d Decoy) HasResponseAction(name string) bool {
+	for _, a := range d.ResponseActions {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }
 
 var reSpace = regexp.MustCompile(`\s+`)
@@ -334,6 +357,10 @@ type Result struct {
 	Sandbox bool
 	// Synthetic is the fake payload to return to the agent in sandbox mode.
 	Synthetic string
+	// ResponseActions are the extra side-effects the touched decoy requests
+	// on a trip (notify_soc, capture_session), copied from the decoy so the
+	// handler can act on and record them.
+	ResponseActions []string
 	// Reason is an operator-readable summary of the trip.
 	Reason string
 }
@@ -352,14 +379,15 @@ func (d *Detector) Check(in Input) Result {
 	sev, act, contain := outcome(decoy.OnTrip)
 	sandbox := decoy.OnTrip == OnTripSandbox
 	return Result{
-		Tripped:   true,
-		Decoy:     decoy,
-		Severity:  sev,
-		Action:    act,
-		Contain:   contain,
-		Sandbox:   sandbox,
-		Synthetic: decoy.Synthetic,
-		Reason:    reasonFor(decoy, act),
+		Tripped:         true,
+		Decoy:           decoy,
+		Severity:        sev,
+		Action:          act,
+		Contain:         contain,
+		Sandbox:         sandbox,
+		Synthetic:       decoy.Synthetic,
+		ResponseActions: decoy.ResponseActions,
+		Reason:          reasonFor(decoy, act),
 	}
 }
 
