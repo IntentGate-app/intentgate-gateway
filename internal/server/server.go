@@ -445,6 +445,11 @@ func New(cfg Config) *http.Server {
 			// keys off to render an "enable INTENTGATE_AUDIT_PERSIST"
 			// hint instead of the editor.
 			mux.Handle("POST /v1/admin/policies/dry-run", handlers.NewAdminPoliciesDryRunHandler(adminCfg))
+			// Proof of Intent: a signed, tamper-evident evidence bundle for a
+			// decision or session, built from the hash-chained audit trail and
+			// signed with the gateway master key. Read-only; not on the request
+			// path.
+			mux.Handle("POST /v1/admin/proof-of-intent", handlers.NewAdminProofOfIntentHandler(adminCfg))
 		}
 		// Effect preview: read-only "look before you leap" projection of a
 		// candidate tool call's blast radius. Always available with an admin
