@@ -170,6 +170,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
+	"github.com/IntentGate-app/intentgate-gateway/internal/federation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
@@ -1060,6 +1061,49 @@ func main() {
 			"engagement_url", os.Getenv("INTENTGATE_DECEPTION_ENGAGEMENT_URL"))
 	}
 
+	// Optional: FEDERATION data-plane push. When a control-plane URL, token, and
+	// node id are configured, this node periodically rolls its local decision
+	// activity up into an aggregate, zero-payload telemetry record and pushes it
+	// OUTBOUND ONLY to the control plane. Customer payloads and data never leave
+	// the local boundary: the rollup carries decision counts, cardinalities, a
+	// check-name breakdown, and an opaque window digest only (see
+	// internal/federation). A push failure is logged and never affects a local
+	// decision, which has already been made and audited by the time a rollup is
+	// built. The control plane pushes policy DOWN over its own path; this loop is
+	// telemetry UP only.
+	if fedReporter := federation.NewReporter(
+		envOr("INTENTGATE_FEDERATION_CONTROL_URL", ""),
+		envOr("INTENTGATE_FEDERATION_TOKEN", ""),
+	); fedReporter.Enabled() {
+		nodeID := envOr("INTENTGATE_NODE_ID", "")
+		fedTenant := envOr("INTENTGATE_FEDERATION_TENANT", "")
+		// Dedicated per-node signing key, established at node join. It is
+		// deliberately NOT the capability master key: the control plane holds
+		// this to verify rollup integrity but must never hold the key that mints
+		// tokens. When unset, rollups are pushed unsigned and the control plane
+		// records them as unverified -- signing is a hardening layer, not a gate.
+		fedSigningKey := []byte(envOr("INTENTGATE_FEDERATION_SIGNING_KEY", ""))
+		fedInterval := 60 * time.Second
+		if v := envOr("INTENTGATE_FEDERATION_INTERVAL_S", ""); v != "" {
+			if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
+				fedInterval = time.Duration(n) * time.Second
+			}
+		}
+		switch {
+		case nodeID == "":
+			logger.Error("federation control url set but INTENTGATE_NODE_ID is empty; federation push disabled")
+		case auditStore == nil:
+			logger.Error("federation control url set but no audit store configured; federation push disabled")
+		default:
+			go runFederationPush(watchCtx, logger, fedReporter, auditStore, fedSigningKey, nodeID, fedTenant, fedInterval)
+			logger.Info("federation push enabled",
+				"node_id", nodeID, "tenant", fedTenant,
+				"url", envOr("INTENTGATE_FEDERATION_CONTROL_URL", ""),
+				"signed", len(fedSigningKey) > 0,
+				"interval_s", int(fedInterval/time.Second))
+		}
+	}
+
 	srv := server.New(server.Config{
 		Addr:                  addr,
 		Logger:                logger,
@@ -1223,6 +1267,86 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// runFederationPush periodically builds and pushes a zero-payload rollup of the
+// node's recent decision activity to the control plane. It never blocks the
+// request path; on any failure the window still advances so a transient
+// control-plane outage self-heals on the next tick rather than backing up.
+func runFederationPush(ctx context.Context, logger *slog.Logger, reporter *federation.Reporter, store auditstore.Store, signingKey []byte, nodeID, tenant string, interval time.Duration) {
+	windowStart := time.Now().Add(-interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			to := time.Now()
+			samples, err := collectFederationSamples(ctx, store, tenant, windowStart, to)
+			if err != nil {
+				logger.Warn("federation rollup query failed; will retry next interval", "err", err)
+				windowStart = to
+				continue
+			}
+			agg := federation.Summarize(samples)
+			digest := federation.WindowDigest(samples)
+			rollup := federation.Build(nodeID, tenant, windowStart, to, agg, digest, time.Now())
+			if len(signingKey) > 0 {
+				if signErr := federation.Sign(&rollup, federation.RollupKeyID, signingKey); signErr != nil {
+					logger.Warn("federation rollup signing failed; skipping window", "err", signErr)
+					windowStart = to
+					continue
+				}
+			}
+			if pushErr := reporter.Push(ctx, rollup); pushErr != nil {
+				logger.Warn("federation rollup push failed", "err", pushErr, "samples", len(samples))
+			} else {
+				logger.Info("federation rollup pushed",
+					"node_id", nodeID, "samples", len(samples),
+					"allow", agg.Decisions.Allow, "hold", agg.Decisions.Hold, "deny", agg.Decisions.Deny)
+			}
+			windowStart = to
+		}
+	}
+}
+
+// collectFederationSamples pages the audit store over [from, to) and reduces each
+// event to a federation.Sample -- categorical keys plus the opaque id/hash
+// material for the window digest, never arguments, reasons, or results. It stops
+// at a hard cap so a very busy window can never exhaust memory; a capped window
+// still produces an honest (if partial) rollup.
+func collectFederationSamples(ctx context.Context, store auditstore.Store, tenant string, from, to time.Time) ([]federation.Sample, error) {
+	const pageSize = 1000
+	const hardCap = 200000
+	var samples []federation.Sample
+	for offset := 0; offset < hardCap; offset += pageSize {
+		events, err := store.Query(ctx, auditstore.QueryFilter{
+			From:   from,
+			To:     to,
+			Tenant: tenant,
+			Limit:  pageSize,
+			Offset: offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range events {
+			samples = append(samples, federation.Sample{
+				Decision:   string(e.Decision),
+				Check:      string(e.Check),
+				Agent:      e.AgentID,
+				Tool:       e.Tool,
+				Session:    e.SessionID,
+				EventID:    e.EventID,
+				ResultHash: e.ResultSHA256,
+			})
+		}
+		if len(events) < pageSize {
+			break
+		}
+	}
+	return samples, nil
 }
 
 // splitCSV parses a comma-separated env value into a trimmed string
