@@ -50,6 +50,13 @@ const (
 	OnTripAlert   OnTrip = "alert"
 	OnTripHold    OnTrip = "hold"
 	OnTripContain OnTrip = "contain"
+	// OnTripSandbox does not contain. The gateway returns the decoy's
+	// synthetic response and lets the agent keep acting, capturing the
+	// whole tool chain as a stateful engagement. It is the high-interaction
+	// counterpart to the tripwire modes above: a contain trip proves
+	// compromise in one touch, a sandbox trip additionally records what the
+	// agent tried to do once it believed it had succeeded.
+	OnTripSandbox OnTrip = "sandbox"
 )
 
 // Severity and Action mirror the console's trip record so a recorded trip
@@ -81,6 +88,11 @@ type Decoy struct {
 	Key    string `json:"key"`
 	Pillar string `json:"pillar"`
 	OnTrip OnTrip `json:"on_trip"`
+	// Synthetic is the fake payload returned to the agent when OnTrip is
+	// sandbox. It is operator-authored believable content (a fake supplier
+	// record, a fake secret) whose only job is to keep the agent acting so
+	// its next move is observed. Empty for non-sandbox decoys.
+	Synthetic string `json:"synthetic,omitempty"`
 }
 
 var reSpace = regexp.MustCompile(`\s+`)
@@ -315,6 +327,13 @@ type Result struct {
 	// Contain is true when the caller should fire the kill switch and
 	// revoke the token, i.e. on-trip == contain.
 	Contain bool
+	// Sandbox is true when on-trip == sandbox: the caller must NOT block or
+	// contain, must return Synthetic to the agent as a successful result,
+	// and must record the interaction as an engagement action so the chain
+	// is captured.
+	Sandbox bool
+	// Synthetic is the fake payload to return to the agent in sandbox mode.
+	Synthetic string
 	// Reason is an operator-readable summary of the trip.
 	Reason string
 }
@@ -331,13 +350,16 @@ func (d *Detector) Check(in Input) Result {
 		return Result{}
 	}
 	sev, act, contain := outcome(decoy.OnTrip)
+	sandbox := decoy.OnTrip == OnTripSandbox
 	return Result{
-		Tripped:  true,
-		Decoy:    decoy,
-		Severity: sev,
-		Action:   act,
-		Contain:  contain,
-		Reason:   reasonFor(decoy, act),
+		Tripped:   true,
+		Decoy:     decoy,
+		Severity:  sev,
+		Action:    act,
+		Contain:   contain,
+		Sandbox:   sandbox,
+		Synthetic: decoy.Synthetic,
+		Reason:    reasonFor(decoy, act),
 	}
 }
 
@@ -349,12 +371,20 @@ func outcome(o OnTrip) (Severity, Action, bool) {
 		return SevCritical, ActionContained, true
 	case OnTripHold:
 		return SevHigh, ActionHeld, false
+	case OnTripSandbox:
+		// Sandbox does not contain: the agent is allowed to keep acting so
+		// its chain is observed. It is a critical signal all the same — the
+		// touch itself is deterministic proof of compromise.
+		return SevCritical, ActionAlerted, false
 	default:
 		return SevMedium, ActionAlerted, false
 	}
 }
 
 func reasonFor(d Decoy, a Action) string {
+	if d.OnTrip == OnTripSandbox {
+		return "agent entered sandbox decoy " + d.Name + "; served synthetic response, chain being captured"
+	}
 	switch a {
 	case ActionContained:
 		return "agent touched decoy " + d.Name + ", in no token's scope; kill switch fired, token revoked"

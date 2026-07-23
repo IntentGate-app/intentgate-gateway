@@ -208,6 +208,11 @@ type Config struct {
 	// nil disables mirroring; trips are still recorded in the gateway audit.
 	// Constructed at startup from INTENTGATE_DECEPTION_TRIP_URL.
 	DeceptionReporter deception.Reporter
+	// EngagementReporter mirrors sandbox interactions to the console so the
+	// live trapped session and its captured chain build up there. nil
+	// disables sandbox mirroring. Constructed from
+	// INTENTGATE_DECEPTION_ENGAGEMENT_URL.
+	EngagementReporter deception.EngagementReporter
 	// EastWest is the optional agent-to-agent (east-west) authorization
 	// guard: a zone model with default-deny. nil disables the check.
 	// Constructed at startup from INTENTGATE_EASTWEST_*. See internal/eastwest.
@@ -312,10 +317,11 @@ func New(cfg Config) *http.Server {
 		FaultIsolation:    cfg.FaultIsolation,
 		ActionGuard:       cfg.ActionGuard,
 		RefVerify:         cfg.RefVerify,
-		Deception:         cfg.Deception,
-		DeceptionReporter: cfg.DeceptionReporter,
-		EastWest:          cfg.EastWest,
-		ZoneScope:         cfg.ZoneScope,
+		Deception:          cfg.Deception,
+		DeceptionReporter:  cfg.DeceptionReporter,
+		EngagementReporter: cfg.EngagementReporter,
+		EastWest:           cfg.EastWest,
+		ZoneScope:          cfg.ZoneScope,
 	}))
 
 	// Reply-side outbound gateway (A1). Inspects the agent's proposed

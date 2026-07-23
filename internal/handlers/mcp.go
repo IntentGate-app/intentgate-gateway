@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,6 +135,10 @@ type MCPHandlerConfig struct {
 	// (best-effort). nil disables mirroring; trips are still recorded in
 	// the gateway audit and SIEM regardless.
 	DeceptionReporter deception.Reporter
+	// EngagementReporter mirrors one sandbox interaction to the console so
+	// the trapped session and its captured chain build up there
+	// (best-effort). nil disables sandbox mirroring.
+	EngagementReporter deception.EngagementReporter
 	// EastWest authorizes agent-to-agent (east-west) calls in the
 	// agent-as-tool model: a zone model with default-deny that keeps a
 	// compromised agent from recruiting agents in other zones. Runs before
@@ -381,6 +386,52 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 			dVerdict = "tripped"
 		}
 		h.cfg.Metrics.ObserveCheck("deception", dVerdict, time.Since(dStart))
+		if dRes.Tripped && dRes.Sandbox {
+			// Sandbox mode: do not contain and do not block. Serve the
+			// synthetic payload so the agent believes it succeeded and keeps
+			// acting, and mirror this interaction so the console assembles
+			// the live session and its captured chain. The touch itself is
+			// still a deterministic compromise signal — it is recorded as a
+			// deception decision in the audit — but containment is deferred
+			// to the operator so the whole tool chain can be observed first.
+			agent := capResult.agentID
+			if agent == "" {
+				agent = "unattributed agent"
+			}
+			if h.cfg.EngagementReporter != nil {
+				go h.cfg.EngagementReporter.ReportEngagement(context.Background(),
+					deception.EngagementAction{
+						Agent:             agent,
+						DecoyID:           dRes.Decoy.ID,
+						DecoyName:         dRes.Decoy.Name,
+						Pillar:            dRes.Decoy.Pillar,
+						Tool:              params.Name,
+						ArgsPreview:       argsPreview(params.Arguments),
+						SyntheticResponse: dRes.Synthetic,
+					})
+			}
+			h.cfg.Logger.Info("mcp tools/call sandboxed",
+				"tool", params.Name, "check", "deception", "agent", capResult.agentID,
+				"decoy", dRes.Decoy.Name, "reason", dRes.Reason)
+			// Audited as escalate, not block: the agent WAS served a
+			// (synthetic) result, so "block" would misstate what happened.
+			// Escalate is the honest verdict — the decoy touch is flagged
+			// for an operator to contain, while the chain is captured.
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionEscalate, audit.CheckDeception, dRes.Reason, start, 0)
+			synthetic := dRes.Synthetic
+			if synthetic == "" {
+				synthetic = "{}"
+			}
+			resp, err := mcp.NewResultResponse(req.ID, mcp.ToolCallResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: synthetic}},
+			})
+			if err != nil {
+				return mcp.NewErrorResponse(req.ID, mcp.CodeInternalError,
+					"deception: synthetic response encode failed", err.Error())
+			}
+			return resp
+		}
 		if dRes.Tripped {
 			if dRes.Contain {
 				if capResult.agentID != "" && h.cfg.KillSwitch != nil {
@@ -2052,6 +2103,40 @@ var (
 type capError string
 
 func (e capError) Error() string { return string(e) }
+
+// argsPreview renders a short, redacted preview of a tool call's arguments
+// for the engagement action record. It keeps argument *keys* (which tell an
+// operator what the agent tried to do) but truncates values, so a captured
+// chain is readable without persisting whole payloads verbatim into the
+// session record. Full capture stays the job of the payload store.
+func argsPreview(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		v := fmt.Sprintf("%v", args[k])
+		if len(v) > 40 {
+			v = v[:40] + "…"
+		}
+		b.WriteString(v)
+		if b.Len() > 300 {
+			b.WriteString(" …")
+			break
+		}
+	}
+	return b.String()
+}
 
 // requestPIIFilter resolves which pii.Filter to apply to the OUTBOUND
 // request arguments. Three-tier fallback identical to the response-

@@ -65,6 +65,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	reporter := deception.NewHTTPReporter(
 		os.Getenv("INTENTGATE_DECEPTION_TRIP_URL"),
+		os.Getenv("INTENTGATE_DECEPTION_ENGAGEMENT_URL"),
 		os.Getenv("INTENTGATE_DECEPTION_TOKEN"),
 	)
 
