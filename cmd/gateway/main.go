@@ -332,6 +332,15 @@ func main() {
 	splunkEvents := envOr("INTENTGATE_SIEM_SPLUNK_EVENTS", "")
 	datadogEvents := envOr("INTENTGATE_SIEM_DATADOG_EVENTS", "")
 	sentinelEvents := envOr("INTENTGATE_SIEM_SENTINEL_EVENTS", "")
+	// OTLP logs exporter — the lean-default, zero-new-infrastructure
+	// telemetry adapter. Emits each audit event as an OTLP LogRecord to
+	// the OTLP/HTTP collector the customer already runs. Endpoint alone
+	// enables it; headers carry any collector/vendor auth.
+	otlpEndpoint := envOr("INTENTGATE_SIEM_OTLP_ENDPOINT", "")
+	otlpService := envOr("INTENTGATE_SIEM_OTLP_SERVICE", "")
+	otlpNamespace := envOr("INTENTGATE_SIEM_OTLP_NAMESPACE", "")
+	otlpHeadersRaw := envOr("INTENTGATE_SIEM_OTLP_HEADERS", "")
+	otlpEvents := envOr("INTENTGATE_SIEM_OTLP_EVENTS", "")
 	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
 	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
 	// so Athena / Glue / Spark can prune partitions at query time
@@ -783,6 +792,11 @@ func main() {
 		splunkEvents:         splunkEvents,
 		datadogEvents:        datadogEvents,
 		sentinelEvents:       sentinelEvents,
+		otlpEndpoint:         otlpEndpoint,
+		otlpService:          otlpService,
+		otlpNamespace:        otlpNamespace,
+		otlpHeadersRaw:       otlpHeadersRaw,
+		otlpEvents:           otlpEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1726,6 +1740,14 @@ type siemEnv struct {
 	splunkEvents   string
 	datadogEvents  string
 	sentinelEvents string
+	// OTLP logs exporter (lean-default telemetry adapter). Endpoint
+	// alone enables it; headersRaw is a "k=v,k2=v2" list parsed in
+	// loadSIEM into request headers (typically a collector auth header).
+	otlpEndpoint   string
+	otlpService    string
+	otlpNamespace  string
+	otlpHeadersRaw string
+	otlpEvents     string
 }
 
 // loadSIEM constructs whichever SIEM emitters the operator has wired
@@ -1831,6 +1853,41 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"dcr", env.sentinelDCRID,
 			"stream", env.sentinelStream,
 			"events", string(sentinelMode))
+	}
+
+	if env.otlpEndpoint != "" {
+		headers := map[string]string{}
+		for _, p := range splitCSV(env.otlpHeadersRaw) {
+			if k, v, ok := strings.Cut(p, "="); ok {
+				k = strings.TrimSpace(k)
+				if k != "" {
+					headers[k] = strings.TrimSpace(v)
+				}
+			}
+		}
+		em, err := siem.NewOTLPEmitter(siem.OTLPConfig{
+			Endpoint:    env.otlpEndpoint,
+			ServiceName: env.otlpService,
+			Namespace:   env.otlpNamespace,
+			Headers:     headers,
+			Logger:      logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("otlp: %w", err)
+		}
+		otlpMode := siem.ParseEventMode(env.otlpEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, otlpMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "otlp")
+		logger.Info("SIEM emitter: otlp",
+			"endpoint", env.otlpEndpoint,
+			"service", env.otlpService,
+			"events", string(otlpMode))
 	}
 
 	if env.s3Bucket != "" {
