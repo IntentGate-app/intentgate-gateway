@@ -73,12 +73,11 @@ func NewKafkaEmitter(cfg KafkaConfig) (*KafkaEmitter, error) {
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.DefaultProduceTopic(cfg.Topic),
 		kgo.ProducerBatchCompression(kgo.SnappyCompression()),
-		// Audit telemetry: prefer throughput/availability over strict
-		// ordering. The record already carries a hash chain for
-		// tamper-evidence, so at-least-once with possible reordering is
-		// acceptable for a downstream SIEM/GRC sink.
-		kgo.RequiredAcks(kgo.LeaderAck()),
 		kgo.ProducerLinger(50 * time.Millisecond),
+		// franz-go defaults to an idempotent producer (acks=all), which
+		// is exactly right for a durable, duplicate-free audit stream.
+		// The gateway-side batch worker still drops-not-blocks, so
+		// acks=all never adds latency to the inline firewall decision.
 	}
 	if cfg.TLS {
 		opts = append(opts, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
