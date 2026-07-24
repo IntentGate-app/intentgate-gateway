@@ -70,7 +70,7 @@ type AdminConfig struct {
 	// exceed this window regardless of what the GRC/IGA workflow requests.
 	ExceptionMaxTTL time.Duration
 	Revocation      revocation.Store
-	Audit        audit.Emitter
+	Audit           audit.Emitter
 	// AuditStore is the queryable audit store consulted by the
 	// /v1/admin/audit endpoint. Optional; when nil, that endpoint is
 	// not registered.
