@@ -341,6 +341,23 @@ func main() {
 	otlpNamespace := envOr("INTENTGATE_SIEM_OTLP_NAMESPACE", "")
 	otlpHeadersRaw := envOr("INTENTGATE_SIEM_OTLP_HEADERS", "")
 	otlpEvents := envOr("INTENTGATE_SIEM_OTLP_EVENTS", "")
+	// Generic HTTPS webhook telemetry sink (Lightweight tier). Distinct
+	// from INTENTGATE_WEBHOOK_URL (the console-notification fan-out); this
+	// posts batched audit events as JSON to any receiver, optionally
+	// HMAC-signed.
+	siemWebhookURL := envOr("INTENTGATE_SIEM_WEBHOOK_URL", "")
+	siemWebhookSecret := envOr("INTENTGATE_SIEM_WEBHOOK_SECRET", "")
+	siemWebhookEvents := envOr("INTENTGATE_SIEM_WEBHOOK_EVENTS", "")
+	// Kafka telemetry adapter (Enterprise tier). Downstream of the
+	// adapter interface on the async path — opt-in, for customers who
+	// already run a Kafka/Confluent/Redpanda backbone. Brokers alone
+	// enable it; topic defaults to intentgate.audit.v1.
+	kafkaBrokers := envOr("INTENTGATE_SIEM_KAFKA_BROKERS", "")
+	kafkaTopic := envOr("INTENTGATE_SIEM_KAFKA_TOPIC", "")
+	kafkaTLS := envOr("INTENTGATE_SIEM_KAFKA_TLS", "") == "true"
+	kafkaSASLUser := envOr("INTENTGATE_SIEM_KAFKA_SASL_USER", "")
+	kafkaSASLPass := envOr("INTENTGATE_SIEM_KAFKA_SASL_PASSWORD", "")
+	kafkaEvents := envOr("INTENTGATE_SIEM_KAFKA_EVENTS", "")
 	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
 	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
 	// so Athena / Glue / Spark can prune partitions at query time
@@ -797,6 +814,15 @@ func main() {
 		otlpNamespace:        otlpNamespace,
 		otlpHeadersRaw:       otlpHeadersRaw,
 		otlpEvents:           otlpEvents,
+		siemWebhookURL:       siemWebhookURL,
+		siemWebhookSecret:    siemWebhookSecret,
+		siemWebhookEvents:    siemWebhookEvents,
+		kafkaBrokers:         kafkaBrokers,
+		kafkaTopic:           kafkaTopic,
+		kafkaTLS:             kafkaTLS,
+		kafkaSASLUser:        kafkaSASLUser,
+		kafkaSASLPass:        kafkaSASLPass,
+		kafkaEvents:          kafkaEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1748,6 +1774,17 @@ type siemEnv struct {
 	otlpNamespace  string
 	otlpHeadersRaw string
 	otlpEvents     string
+	// Generic HTTPS webhook telemetry sink (Lightweight tier).
+	siemWebhookURL    string
+	siemWebhookSecret string
+	siemWebhookEvents string
+	// Kafka telemetry adapter (Enterprise tier, async downstream).
+	kafkaBrokers  string
+	kafkaTopic    string
+	kafkaTLS      bool
+	kafkaSASLUser string
+	kafkaSASLPass string
+	kafkaEvents   string
 }
 
 // loadSIEM constructs whichever SIEM emitters the operator has wired
@@ -1888,6 +1925,59 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"endpoint", env.otlpEndpoint,
 			"service", env.otlpService,
 			"events", string(otlpMode))
+	}
+
+	if env.siemWebhookURL != "" {
+		em, err := siem.NewWebhookEmitter(siem.WebhookConfig{
+			URL:    env.siemWebhookURL,
+			Secret: env.siemWebhookSecret,
+			Logger: logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("webhook: %w", err)
+		}
+		webhookMode := siem.ParseEventMode(env.siemWebhookEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, webhookMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "webhook")
+		logger.Info("SIEM emitter: webhook", "url", env.siemWebhookURL, "events", string(webhookMode))
+	}
+
+	if env.kafkaBrokers != "" {
+		topic := env.kafkaTopic
+		if topic == "" {
+			topic = "intentgate.audit.v1"
+		}
+		em, err := siem.NewKafkaEmitter(siem.KafkaConfig{
+			Brokers:  splitCSV(env.kafkaBrokers),
+			Topic:    topic,
+			TLS:      env.kafkaTLS,
+			SASLUser: env.kafkaSASLUser,
+			SASLPass: env.kafkaSASLPass,
+			Logger:   logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("kafka: %w", err)
+		}
+		kafkaMode := siem.ParseEventMode(env.kafkaEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, kafkaMode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "kafka")
+		logger.Info("SIEM emitter: kafka",
+			"brokers", env.kafkaBrokers,
+			"topic", topic,
+			"tls", env.kafkaTLS,
+			"events", string(kafkaMode))
 	}
 
 	if env.s3Bucket != "" {

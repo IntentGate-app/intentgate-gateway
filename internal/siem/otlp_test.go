@@ -144,15 +144,3 @@ func TestOTLPEmitterExportsLogRecord(t *testing.T) {
 		t.Errorf("event_id attr = %q, want evt-123", attrs["intentgate.event_id"])
 	}
 }
-
-func TestNewKafkaEmitterIsRoadmap(t *testing.T) {
-	if _, err := NewKafkaEmitter(KafkaConfig{Brokers: []string{"localhost:9092"}}); err == nil {
-		t.Fatal("expected Kafka adapter to report not-implemented")
-	}
-	// The type still satisfies the Adapter contract (Status reports it
-	// as present-but-not-configured) so the seam is honest.
-	var k KafkaEmitter
-	if st := k.Status(); st.Configured {
-		t.Error("kafka stub should report Configured=false")
-	}
-}

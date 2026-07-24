@@ -27,14 +27,17 @@ type Adapter interface {
 	StatusReporter
 }
 
-// Compile-time proof that every shipping and roadmap sink satisfies the
-// one interface. The default, zero-new-infrastructure path is the OTLP
-// exporter and the direct SIEM sinks; Kafka is a roadmap placeholder.
+// Compile-time proof that every sink satisfies the one interface. The
+// default, zero-new-infrastructure path is the OTLP exporter, the direct
+// SIEM sinks, and the HTTPS webhook. Kafka is an opt-in enterprise-tier
+// adapter that sits downstream on the async path (brokers must be
+// configured; off by default).
 var (
 	_ Adapter = (*SplunkEmitter)(nil)
 	_ Adapter = (*DatadogEmitter)(nil)
 	_ Adapter = (*SentinelEmitter)(nil)
 	_ Adapter = (*S3Emitter)(nil)
 	_ Adapter = (*OTLPEmitter)(nil)
+	_ Adapter = (*WebhookEmitter)(nil)
 	_ Adapter = (*KafkaEmitter)(nil)
 )
