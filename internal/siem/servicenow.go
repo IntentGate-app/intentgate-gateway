@@ -140,11 +140,11 @@ type ServiceNowConfig struct {
 // per event. It reuses the shared batch worker for the same
 // non-blocking, drops-not-blocks contract every adapter shares.
 type ServiceNowEmitter struct {
-	cfg     ServiceNowConfig
-	be      *batchEmitter
-	name    string
-	base    string
-	table   string
+	cfg    ServiceNowConfig
+	be     *batchEmitter
+	name   string
+	base   string
+	table  string
 	minSev severity
 	label  string
 
