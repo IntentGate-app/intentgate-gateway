@@ -64,7 +64,12 @@ type AdminConfig struct {
 	// can hit /v1/admin/*.
 	TenantAdmins map[string]string
 	MasterKey    []byte
-	Revocation   revocation.Store
+	// ExceptionMaxTTL caps the lifetime of a token minted by the risk
+	// exception-grant endpoint (POST /v1/admin/exceptions/grant). Zero
+	// falls back to a safe default (48h). A temporary exception can never
+	// exceed this window regardless of what the GRC/IGA workflow requests.
+	ExceptionMaxTTL time.Duration
+	Revocation      revocation.Store
 	Audit        audit.Emitter
 	// AuditStore is the queryable audit store consulted by the
 	// /v1/admin/audit endpoint. Optional; when nil, that endpoint is

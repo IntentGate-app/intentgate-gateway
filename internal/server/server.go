@@ -392,6 +392,10 @@ func New(cfg Config) *http.Server {
 		}
 		mux.Handle("GET /v1/admin/revocations", handlers.NewAdminRevocationsListHandler(adminCfg))
 		mux.Handle("POST /v1/admin/mint", handlers.NewAdminMintHandler(adminCfg))
+		// Risk-exception grant (Workflow C): a GRC/IGA-approved temporary
+		// exception, delivered via the in-VPC MID Server, mints a
+		// TTL-capped, tool-scoped, agent-locked capability token.
+		mux.Handle("POST /v1/admin/exceptions/grant", handlers.NewAdminExceptionGrantHandler(adminCfg))
 		// Tenants list — surfaces configured per-tenant admin scopes so
 		// the console can populate a tenant switcher. Always registered
 		// when admin auth is set; returns an empty list when no per-
