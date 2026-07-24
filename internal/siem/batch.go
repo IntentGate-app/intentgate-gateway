@@ -150,7 +150,9 @@ func (b *batchEmitter) run() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), b.cfg.FlushTimeout)
+		start := time.Now()
 		err := b.cfg.Flush(ctx, pending)
+		dur := time.Since(start)
 		cancel()
 		if err != nil {
 			b.cfg.Logger.Warn("siem: flush failed",
@@ -164,7 +166,7 @@ func (b *batchEmitter) run() {
 			// decision. SIEM is a duplicate stream, not the source of
 			// truth.
 		} else {
-			b.counters.recordFlush(len(pending))
+			b.counters.recordFlush(len(pending), dur)
 		}
 		pending = pending[:0]
 	}

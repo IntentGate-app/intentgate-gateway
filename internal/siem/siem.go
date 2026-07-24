@@ -74,6 +74,14 @@ type Status struct {
 	// inline path stays non-blocking (drops instead of stalling).
 	BufferSize int `json:"buffer_size,omitempty"`
 	BufferUsed int `json:"buffer_used,omitempty"`
+	// LastFlushMicros is the measured wall-clock duration of the most
+	// recent successful flush (serialise + network round trip) in
+	// microseconds — the real per-adapter export latency, so the
+	// console renders a measured figure instead of an invented one.
+	// AvgFlushMicros is the running mean across every successful flush
+	// since process start. Both are zero until the first flush lands.
+	LastFlushMicros int64 `json:"last_flush_micros,omitempty"`
+	AvgFlushMicros  int64 `json:"avg_flush_micros,omitempty"`
 	// LastError is the most recent error message from the worker, or
 	// the empty string when the destination is healthy.
 	LastError string `json:"last_error,omitempty"`
@@ -104,11 +112,21 @@ type counters struct {
 	// lastError holds the most recent worker error message. atomic
 	// pointer so we can swap a *string without locking.
 	lastError atomic.Pointer[string]
+	// flush-latency accounting. lastFlushMicros is the duration of the
+	// most recent successful flush; flushOps and totalFlushMicros back
+	// the running mean. All atomic so Status() stays lock-free.
+	lastFlushMicros  atomic.Int64
+	flushOps         atomic.Uint64
+	totalFlushMicros atomic.Int64
 }
 
-func (c *counters) recordFlush(n int) {
+func (c *counters) recordFlush(n int, d time.Duration) {
 	c.flushed.Add(uint64(n))
 	c.lastFlushNs.Store(time.Now().UnixNano())
+	us := d.Microseconds()
+	c.lastFlushMicros.Store(us)
+	c.flushOps.Add(1)
+	c.totalFlushMicros.Add(us)
 	empty := ""
 	c.lastError.Store(&empty)
 }
@@ -136,6 +154,10 @@ func (c *counters) snapshot(name, endpoint string, configured bool) Status {
 	}
 	if ns := c.lastFlushNs.Load(); ns > 0 {
 		st.LastFlushTs = time.Unix(0, ns).UTC()
+	}
+	st.LastFlushMicros = c.lastFlushMicros.Load()
+	if ops := c.flushOps.Load(); ops > 0 {
+		st.AvgFlushMicros = c.totalFlushMicros.Load() / int64(ops)
 	}
 	if msg := c.lastError.Load(); msg != nil {
 		st.LastError = *msg
