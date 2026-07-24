@@ -74,6 +74,11 @@ func NewKafkaEmitter(cfg KafkaConfig) (*KafkaEmitter, error) {
 		kgo.DefaultProduceTopic(cfg.Topic),
 		kgo.ProducerBatchCompression(kgo.SnappyCompression()),
 		kgo.ProducerLinger(50 * time.Millisecond),
+		// Ask the broker to create the audit topic on first produce
+		// (franz-go does not by default). Works where the broker allows
+		// auto-creation; on brokers that forbid it by policy, pre-create
+		// the topic (the adapter still drops-not-blocks until it exists).
+		kgo.AllowAutoTopicCreation(),
 		// franz-go defaults to an idempotent producer (acks=all), which
 		// is exactly right for a durable, duplicate-free audit stream.
 		// The gateway-side batch worker still drops-not-blocks, so
