@@ -452,7 +452,13 @@ func (s *ServiceNowEmitter) callbackData(ev audit.Event) map[string]any {
 		"risk_score":      strings.ToUpper(severityLabel(decisionSeverity(ev.Decision))),
 		"policy_rule":     ev.Reason,
 		"action_required": "HUMAN_APPROVAL",
-		"callback_url":    base + "/v1/approvals/" + url.PathEscape(ev.EventID),
+		// The resume endpoint a ServiceNow Flow / MID Server calls to
+		// release or drop the held call. It is the gateway's admin decide
+		// route; the MID Server holds the IntentGate admin token as a
+		// credential and never exposes it to the ServiceNow cloud. Body:
+		// {"decision":"approve"|"reject","decided_by":"<snow user>","note":"<work note>"}.
+		"callback_url":    base + "/v1/admin/approvals/" + url.PathEscape(ev.EventID) + "/decide",
+		"callback_method": "POST",
 	}
 	if s.cfg.IncludeProofHashes && ev.ResultSHA256 != "" {
 		cb["proof_of_intent_hash"] = ev.ResultSHA256
