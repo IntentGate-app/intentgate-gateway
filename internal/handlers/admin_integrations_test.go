@@ -55,8 +55,8 @@ func TestAdminIntegrations_ReturnsStubsWhenNoneWired(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Integrations) != 7 {
-		t.Fatalf("want 7 stubs (splunk,datadog,sentinel,s3,otlp,webhook,kafka), got %d", len(got.Integrations))
+	if len(got.Integrations) != 8 {
+		t.Fatalf("want 8 stubs (splunk,datadog,sentinel,s3,otlp,webhook,kafka,servicenow), got %d", len(got.Integrations))
 	}
 	for _, s := range got.Integrations {
 		if s.Configured {
@@ -94,8 +94,8 @@ func TestAdminIntegrations_ReturnsWiredStatus(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got.Integrations) != 7 {
-		t.Fatalf("want 7 entries (splunk wired, rest stubs), got %d", len(got.Integrations))
+	if len(got.Integrations) != 8 {
+		t.Fatalf("want 8 entries (splunk wired, rest stubs), got %d", len(got.Integrations))
 	}
 	if got.Integrations[0].Name != "splunk" || !got.Integrations[0].Configured {
 		t.Errorf("splunk entry wrong: %+v", got.Integrations[0])

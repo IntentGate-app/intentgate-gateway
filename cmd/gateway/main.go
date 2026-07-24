@@ -358,6 +358,19 @@ func main() {
 	kafkaSASLUser := envOr("INTENTGATE_SIEM_KAFKA_SASL_USER", "")
 	kafkaSASLPass := envOr("INTENTGATE_SIEM_KAFKA_SASL_PASSWORD", "")
 	kafkaEvents := envOr("INTENTGATE_SIEM_KAFKA_EVENTS", "")
+	// ServiceNow GRC/SIR/ITSM adapter (configurable target). Instance URL
+	// enables it; target defaults to "grc". Auth is basic (USERNAME/
+	// PASSWORD) or OAuth2 client-credentials (CLIENT_ID/CLIENT_SECRET).
+	snInstanceURL := envOr("INTENTGATE_SIEM_SERVICENOW_INSTANCE_URL", "")
+	snTarget := envOr("INTENTGATE_SIEM_SERVICENOW_TARGET", "")
+	snTable := envOr("INTENTGATE_SIEM_SERVICENOW_TABLE", "")
+	snUsername := envOr("INTENTGATE_SIEM_SERVICENOW_USERNAME", "")
+	snPassword := envOr("INTENTGATE_SIEM_SERVICENOW_PASSWORD", "")
+	snClientID := envOr("INTENTGATE_SIEM_SERVICENOW_CLIENT_ID", "")
+	snClientSecret := envOr("INTENTGATE_SIEM_SERVICENOW_CLIENT_SECRET", "")
+	snMinSeverity := envOr("INTENTGATE_SIEM_SERVICENOW_MIN_SEVERITY", "")
+	snIncludeAllows := envOr("INTENTGATE_SIEM_SERVICENOW_INCLUDE_ALLOWS", "") == "true"
+	snCallbackBaseURL := envOr("INTENTGATE_SIEM_SERVICENOW_CALLBACK_BASE_URL", "")
 	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
 	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
 	// so Athena / Glue / Spark can prune partitions at query time
@@ -817,6 +830,16 @@ func main() {
 		siemWebhookURL:       siemWebhookURL,
 		siemWebhookSecret:    siemWebhookSecret,
 		siemWebhookEvents:    siemWebhookEvents,
+		snInstanceURL:        snInstanceURL,
+		snTarget:             snTarget,
+		snTable:              snTable,
+		snUsername:           snUsername,
+		snPassword:           snPassword,
+		snClientID:           snClientID,
+		snClientSecret:       snClientSecret,
+		snMinSeverity:        snMinSeverity,
+		snIncludeAllows:      snIncludeAllows,
+		snCallbackBaseURL:    snCallbackBaseURL,
 		kafkaBrokers:         kafkaBrokers,
 		kafkaTopic:           kafkaTopic,
 		kafkaTLS:             kafkaTLS,
@@ -1785,6 +1808,17 @@ type siemEnv struct {
 	kafkaSASLUser string
 	kafkaSASLPass string
 	kafkaEvents   string
+	// ServiceNow GRC/SIR/ITSM adapter (configurable target, async).
+	snInstanceURL     string
+	snTarget          string
+	snTable           string
+	snUsername        string
+	snPassword        string
+	snClientID        string
+	snClientSecret    string
+	snMinSeverity     string
+	snIncludeAllows   bool
+	snCallbackBaseURL string
 }
 
 // loadSIEM constructs whichever SIEM emitters the operator has wired
@@ -1978,6 +2012,36 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"topic", topic,
 			"tls", env.kafkaTLS,
 			"events", string(kafkaMode))
+	}
+
+	if env.snInstanceURL != "" {
+		em, err := siem.NewServiceNowEmitter(siem.ServiceNowConfig{
+			InstanceURL:        env.snInstanceURL,
+			Target:             siem.ServiceNowTarget(strings.ToLower(strings.TrimSpace(env.snTarget))),
+			Table:              env.snTable,
+			Username:           env.snUsername,
+			Password:           env.snPassword,
+			ClientID:           env.snClientID,
+			ClientSecret:       env.snClientSecret,
+			MinSeverity:        env.snMinSeverity,
+			IncludeAllows:      env.snIncludeAllows,
+			IncludeProofHashes: true,
+			CallbackBaseURL:    env.snCallbackBaseURL,
+			Logger:             logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("servicenow: %w", err)
+		}
+		// The ServiceNow adapter applies its own severity / allow gate
+		// (per its config), so it is not wrapped in a RoutingEmitter.
+		emitters = append(emitters, em)
+		reporters = append(reporters, em)
+		labels = append(labels, "servicenow")
+		logger.Info("SIEM emitter: servicenow",
+			"instance", env.snInstanceURL,
+			"target", env.snTarget,
+			"table", env.snTable,
+			"include_allows", env.snIncludeAllows)
 	}
 
 	if env.s3Bucket != "" {

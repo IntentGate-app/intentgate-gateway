@@ -1784,7 +1784,7 @@ func NewAdminIntegrationsHandler(cfg AdminConfig) http.Handler {
 		// Every telemetry adapter the gateway supports, in display
 		// order. Ones the operator hasn't wired up are returned as
 		// unconfigured stubs so the console renders a stable card grid.
-		canonical := []string{"splunk", "datadog", "sentinel", "s3", "otlp", "webhook", "kafka"}
+		canonical := []string{"splunk", "datadog", "sentinel", "s3", "otlp", "webhook", "kafka", "servicenow"}
 		emitted := make(map[string]bool, len(canonical))
 		out := make([]siem.Status, 0, len(canonical)+len(order))
 		for _, name := range canonical {
