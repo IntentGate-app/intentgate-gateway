@@ -1772,17 +1772,33 @@ func NewAdminIntegrationsHandler(cfg AdminConfig) http.Handler {
 		// console wants a stable card grid; "splunk + datadog" is the
 		// canonical order in v0.6.
 		statuses := make(map[string]siem.Status)
+		var order []string
 		for _, rep := range cfg.SIEMReporters {
 			s := rep.Status()
+			if _, seen := statuses[s.Name]; !seen {
+				order = append(order, s.Name)
+			}
 			statuses[s.Name] = s
 		}
 
-		out := make([]siem.Status, 0, 3)
-		for _, name := range []string{"splunk", "datadog", "sentinel"} {
+		// Every telemetry adapter the gateway supports, in display
+		// order. Ones the operator hasn't wired up are returned as
+		// unconfigured stubs so the console renders a stable card grid.
+		canonical := []string{"splunk", "datadog", "sentinel", "s3", "otlp", "webhook", "kafka"}
+		emitted := make(map[string]bool, len(canonical))
+		out := make([]siem.Status, 0, len(canonical)+len(order))
+		for _, name := range canonical {
+			emitted[name] = true
 			if s, ok := statuses[name]; ok {
 				out = append(out, s)
 			} else {
 				out = append(out, siem.Status{Name: name, Configured: false})
+			}
+		}
+		// Any configured reporter not in the canonical list (future sinks).
+		for _, name := range order {
+			if !emitted[name] {
+				out = append(out, statuses[name])
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"integrations": out})
