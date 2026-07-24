@@ -186,12 +186,11 @@ func NewServiceNowEmitter(cfg ServiceNowConfig) (*ServiceNowEmitter, error) {
 	}
 
 	sn := &ServiceNowEmitter{
-		cfg:     cfg,
-		name:    "servicenow",
-		base:    strings.TrimRight(strings.TrimSpace(cfg.InstanceURL), "/"),
-		table:   table,
-		minSev:  parseSeverity(cfg.MinSeverity),
-		useAuth: true,
+		cfg:    cfg,
+		name:   "servicenow",
+		base:   strings.TrimRight(strings.TrimSpace(cfg.InstanceURL), "/"),
+		table:  table,
+		minSev: parseSeverity(cfg.MinSeverity),
 	}
 	sn.label = sn.base + " → " + string(cfg.Target) + ":" + table
 	sn.be = newBatchEmitter(batchConfig{
