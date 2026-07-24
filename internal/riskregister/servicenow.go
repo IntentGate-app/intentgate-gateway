@@ -48,14 +48,14 @@ type ServiceNowConfig struct {
 
 // ServiceNowExporter implements [Exporter] against ServiceNow IRM.
 type ServiceNowExporter struct {
-	cfg       ServiceNowConfig
-	base      string
-	indTable  string
-	issueTbl  string
-	client    *http.Client
-	mu        sync.Mutex
-	token     string
-	tokenAt   time.Time
+	cfg      ServiceNowConfig
+	base     string
+	indTable string
+	issueTbl string
+	client   *http.Client
+	mu       sync.Mutex
+	token    string
+	tokenAt  time.Time
 }
 
 // NewServiceNowExporter validates config and returns the exporter.
@@ -98,17 +98,17 @@ func (s *ServiceNowExporter) PushIndicators(ctx context.Context, inds []RiskIndi
 	var firstErr error
 	for _, r := range inds {
 		body := map[string]any{
-			"short_description":  fmt.Sprintf("IntentGate risk indicator: %s (%d/%d blocked)", agentLabel(r.AgentID), r.Deny, r.Total),
-			"u_agent_id":         r.AgentID,
-			"u_tenant":           r.Tenant,
-			"u_allow":            r.Allow,
-			"u_deny":             r.Deny,
-			"u_escalate":         r.Escalate,
-			"u_total":            r.Total,
-			"u_block_rate":       fmt.Sprintf("%.4f", r.BlockRate()),
-			"u_window_start":     r.WindowStart.UTC().Format(time.RFC3339),
-			"u_window_end":       r.WindowEnd.UTC().Format(time.RFC3339),
-			"u_source":           "IntentGate",
+			"short_description": fmt.Sprintf("IntentGate risk indicator: %s (%d/%d blocked)", agentLabel(r.AgentID), r.Deny, r.Total),
+			"u_agent_id":        r.AgentID,
+			"u_tenant":          r.Tenant,
+			"u_allow":           r.Allow,
+			"u_deny":            r.Deny,
+			"u_escalate":        r.Escalate,
+			"u_total":           r.Total,
+			"u_block_rate":      fmt.Sprintf("%.4f", r.BlockRate()),
+			"u_window_start":    r.WindowStart.UTC().Format(time.RFC3339),
+			"u_window_end":      r.WindowEnd.UTC().Format(time.RFC3339),
+			"u_source":          "IntentGate",
 		}
 		if err := s.post(ctx, endpoint, body); err != nil && firstErr == nil {
 			firstErr = err
