@@ -181,6 +181,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/refverify"
 	"github.com/IntentGate-app/intentgate-gateway/internal/revocation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/server"
+	"github.com/IntentGate-app/intentgate-gateway/internal/riskregister"
 	"github.com/IntentGate-app/intentgate-gateway/internal/siem"
 	"github.com/IntentGate-app/intentgate-gateway/internal/task"
 	"github.com/IntentGate-app/intentgate-gateway/internal/tenantscope"
@@ -371,6 +372,21 @@ func main() {
 	snMinSeverity := envOr("INTENTGATE_SIEM_SERVICENOW_MIN_SEVERITY", "")
 	snIncludeAllows := envOr("INTENTGATE_SIEM_SERVICENOW_INCLUDE_ALLOWS", "") == "true"
 	snCallbackBaseURL := envOr("INTENTGATE_SIEM_SERVICENOW_CALLBACK_BASE_URL", "")
+	// Risk register (GRC/IRM) — vendor-agnostic. ServiceNow IRM is the
+	// first concrete target; instance URL enables it. Auth is basic
+	// (USERNAME/PASSWORD) or OAuth2 client-credentials (CLIENT_ID/SECRET).
+	// The aggregator rolls decisions into per-agent risk indicators every
+	// INTERVAL and opens an issue when an agent's blocks in one window
+	// reach BLOCK_THRESHOLD (0 disables issues).
+	riskSNInstanceURL := envOr("INTENTGATE_RISK_SERVICENOW_INSTANCE_URL", "")
+	riskSNUsername := envOr("INTENTGATE_RISK_SERVICENOW_USERNAME", "")
+	riskSNPassword := envOr("INTENTGATE_RISK_SERVICENOW_PASSWORD", "")
+	riskSNClientID := envOr("INTENTGATE_RISK_SERVICENOW_CLIENT_ID", "")
+	riskSNClientSecret := envOr("INTENTGATE_RISK_SERVICENOW_CLIENT_SECRET", "")
+	riskSNIndicatorTable := envOr("INTENTGATE_RISK_SERVICENOW_INDICATOR_TABLE", "")
+	riskSNIssueTable := envOr("INTENTGATE_RISK_SERVICENOW_ISSUE_TABLE", "")
+	riskBlockThreshold := envIntOr("INTENTGATE_RISK_BLOCK_THRESHOLD", 0)
+	riskIntervalSec := envIntOr("INTENTGATE_RISK_INTERVAL_SECONDS", 60)
 	// S3 cold-storage sink. Audit events land as gzipped NDJSON in
 	// a Hive-partitioned key tree (year=YYYY/month=MM/day=DD/hour=HH)
 	// so Athena / Glue / Spark can prune partitions at query time
@@ -874,9 +890,46 @@ func main() {
 		auditDesc = auditDesc + "+" + webhookDesc
 	}
 
+	// Risk register aggregator (GRC/IRM) — vendor-agnostic. A non-blocking
+	// peer in the audit fan-out: Emit only counts, and a background ticker
+	// rolls each window into per-agent risk indicators (and threshold
+	// issues) pushed to the configured register. ServiceNow IRM today;
+	// other registers plug into the same riskregister.Exporter seam.
+	var riskAggregator *riskregister.Aggregator
+	if riskSNInstanceURL != "" {
+		exp, err := riskregister.NewServiceNowExporter(riskregister.ServiceNowConfig{
+			InstanceURL:    riskSNInstanceURL,
+			IndicatorTable: riskSNIndicatorTable,
+			IssueTable:     riskSNIssueTable,
+			Username:       riskSNUsername,
+			Password:       riskSNPassword,
+			ClientID:       riskSNClientID,
+			ClientSecret:   riskSNClientSecret,
+			Logger:         logger,
+		})
+		if err != nil {
+			logger.Error("failed to initialize risk register exporter", "err", err)
+			os.Exit(1)
+		}
+		riskAggregator = riskregister.NewAggregator(exp, riskregister.Config{
+			FlushInterval:  time.Duration(riskIntervalSec) * time.Second,
+			BlockThreshold: riskBlockThreshold,
+			Logger:         logger,
+		})
+		auditEmitter = audit.NewFanOut(auditEmitter, riskAggregator)
+		auditDesc = auditDesc + "+riskregister(servicenow)"
+		logger.Info("risk register: servicenow",
+			"instance", riskSNInstanceURL,
+			"interval_s", riskIntervalSec,
+			"block_threshold", riskBlockThreshold)
+	}
+
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if riskAggregator != nil {
+			_ = riskAggregator.Stop(shutdownCtx)
+		}
 		// Drain SIEM emitters first so any tail-end events make it
 		// to Splunk / Datadog before the process exits.
 		for _, e := range siemEmitters {
@@ -1369,6 +1422,17 @@ func loadBudgetStore(logger *slog.Logger, redisURL string) (budget.Store, string
 func envOr(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
+	}
+	return fallback
+}
+
+// envIntOr reads an integer env var, returning fallback when unset or
+// unparseable.
+func envIntOr(key string, fallback int) int {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
