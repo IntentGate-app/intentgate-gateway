@@ -102,7 +102,7 @@ func (o *OTLPEmitter) Stop(ctx context.Context) error { return o.be.Stop(ctx) }
 // Status snapshots the emitter for the admin endpoint. The endpoint URL
 // is exposed; the headers (which may carry an API key) never are.
 func (o *OTLPEmitter) Status() Status {
-	return o.be.counters.snapshot(o.name, o.logsURL, true)
+	return o.be.snapshot(o.name, o.logsURL, true)
 }
 
 // otlpLogsURL returns the logs signal URL. If the operator already gave

@@ -67,6 +67,13 @@ type Status struct {
 	// the buffer was full when Emit fired. Sustained drops indicate
 	// the destination is too slow or that BufferSize is too small.
 	DroppedCount uint64 `json:"dropped_count"`
+	// BufferSize is the emitter's in-memory ring-buffer (channel)
+	// capacity; BufferUsed is the current fill. BufferUsed/BufferSize is
+	// the ring-buffer saturation the console surfaces — a sustained
+	// non-zero fill means a downstream sink is falling behind, while the
+	// inline path stays non-blocking (drops instead of stalling).
+	BufferSize int `json:"buffer_size,omitempty"`
+	BufferUsed int `json:"buffer_used,omitempty"`
 	// LastError is the most recent error message from the worker, or
 	// the empty string when the destination is healthy.
 	LastError string `json:"last_error,omitempty"`

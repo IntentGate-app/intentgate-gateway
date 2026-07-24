@@ -79,7 +79,7 @@ func (w *WebhookEmitter) Stop(ctx context.Context) error { return w.be.Stop(ctx)
 // Status snapshots the emitter for the admin endpoint. The URL is
 // exposed; the signing secret never is.
 func (w *WebhookEmitter) Status() Status {
-	return w.be.counters.snapshot(w.name, w.cfg.URL, true)
+	return w.be.snapshot(w.name, w.cfg.URL, true)
 }
 
 type webhookPayload struct {

@@ -127,7 +127,7 @@ func (k *KafkaEmitter) Stop(ctx context.Context) error {
 // Status snapshots the emitter for the admin endpoint. The broker/topic
 // label is exposed; SASL credentials never are.
 func (k *KafkaEmitter) Status() Status {
-	return k.be.counters.snapshot(k.name, k.label, true)
+	return k.be.snapshot(k.name, k.label, true)
 }
 
 // flush produces the batch synchronously so any broker error propagates

@@ -90,7 +90,7 @@ func (s *SplunkEmitter) Stop(ctx context.Context) error { return s.be.Stop(ctx) 
 // Status snapshots the emitter for the admin endpoint. The endpoint
 // URL is exposed; the token never is.
 func (s *SplunkEmitter) Status() Status {
-	return s.be.counters.snapshot(s.name, s.cfg.URL, true)
+	return s.be.snapshot(s.name, s.cfg.URL, true)
 }
 
 // hecEvent is the Splunk HEC envelope. Time is unix epoch (float

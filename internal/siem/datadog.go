@@ -95,7 +95,7 @@ func (d *DatadogEmitter) Stop(ctx context.Context) error { return d.be.Stop(ctx)
 // Status snapshots the emitter for the admin endpoint. URL is
 // exposed; the API key never is.
 func (d *DatadogEmitter) Status() Status {
-	return d.be.counters.snapshot(d.name, d.url, true)
+	return d.be.snapshot(d.name, d.url, true)
 }
 
 // ddLog is the wire shape Datadog Logs Intake accepts. The "ddtags"

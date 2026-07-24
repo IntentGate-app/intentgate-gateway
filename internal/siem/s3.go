@@ -165,7 +165,7 @@ func (s *S3Emitter) Stop(ctx context.Context) error { return s.be.Stop(ctx) }
 // surfaces the bucket name (innocuous); credentials are never exposed.
 func (s *S3Emitter) Status() Status {
 	endpoint := "s3://" + s.cfg.Bucket + "/" + s.cfg.Prefix
-	return s.be.counters.snapshot(s.name, endpoint, true)
+	return s.be.snapshot(s.name, endpoint, true)
 }
 
 // flushOnce serializes the batch to gzipped NDJSON and writes it to

@@ -131,7 +131,7 @@ func (s *SentinelEmitter) Stop(ctx context.Context) error { return s.be.Stop(ctx
 // Status snapshots the emitter for the admin endpoint. The DCE URL
 // is exposed (not secret); credentials never are.
 func (s *SentinelEmitter) Status() Status {
-	return s.be.counters.snapshot(s.name, s.cfg.DCEUrl, true)
+	return s.be.snapshot(s.name, s.cfg.DCEUrl, true)
 }
 
 // flush is the per-batch worker callback. Acquires a fresh token if

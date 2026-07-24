@@ -86,6 +86,18 @@ func newBatchEmitter(cfg batchConfig) *batchEmitter {
 	return be
 }
 
+// snapshot returns the emitter status including the live ring-buffer
+// fill (len/cap of the worker channel), so the console can show real
+// buffer saturation rather than a fabricated gauge.
+func (b *batchEmitter) snapshot(name, endpoint string, configured bool) Status {
+	st := b.counters.snapshot(name, endpoint, configured)
+	if b != nil && b.ch != nil {
+		st.BufferSize = cap(b.ch)
+		st.BufferUsed = len(b.ch)
+	}
+	return st
+}
+
 // Emit hands the event to the worker. Non-blocking; drops on full
 // buffer or after Stop.
 func (b *batchEmitter) Emit(_ context.Context, ev audit.Event) {
