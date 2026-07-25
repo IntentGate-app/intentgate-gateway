@@ -47,6 +47,10 @@ type Config struct {
 	// MasterKey is the HMAC key used to verify capability tokens on
 	// /v1/mcp. May be nil only when RequireCapability is false.
 	MasterKey []byte
+	// OBOKey is the HMAC key for on-behalf-of tokens, passed through to the
+	// MCP handler. Empty disables OBO enforcement (a request presenting an
+	// OBO header is then rejected rather than silently ignored).
+	OBOKey []byte
 	// RequireCapability rejects /v1/mcp requests that don't carry a
 	// valid Bearer capability token. Default false (dev mode).
 	RequireCapability bool
@@ -291,6 +295,7 @@ func New(cfg Config) *http.Server {
 	mux.Handle("POST /v1/mcp", handlers.NewMCPHandler(handlers.MCPHandlerConfig{
 		Logger:             logger,
 		MasterKey:          cfg.MasterKey,
+		OBOKey:             cfg.OBOKey,
 		RequireCapability:  cfg.RequireCapability,
 		Extractor:          cfg.Extractor,
 		RequireIntent:      cfg.RequireIntent,

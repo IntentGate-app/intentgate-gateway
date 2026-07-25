@@ -269,6 +269,12 @@ type Input struct {
 	SessionID  string         `json:"session_id,omitempty"`
 	Intent     *InputIntent   `json:"intent,omitempty"`
 	Capability *InputCap      `json:"capability,omitempty"`
+	// User is the delegating human principal (on-behalf-of), set only when the
+	// agent forwarded a verified OBO token. It carries the human's governance
+	// attributes so policy can enforce the user-access layer — e.g. a per-user
+	// delegated spend ceiling. Nil for autonomous agent calls (no delegating
+	// user), in which case the user-access layer does not apply.
+	User *InputUser `json:"user,omitempty"`
 	// EastWest is set only when the call is an agent-to-agent (east-west)
 	// call. Policies read input.east_west to condition a specific edge on
 	// the caller, the callee, and their zones (for example: deny any call
@@ -291,6 +297,22 @@ type InputEastWest struct {
 	CallerZone  string `json:"caller_zone,omitempty"`
 	CalleeAgent string `json:"callee_agent,omitempty"`
 	CalleeZone  string `json:"callee_zone,omitempty"`
+}
+
+// InputUser is the delegating human principal (on-behalf-of), exposed to
+// policy and populated by the MCP handler from a verified OBO token. Subject
+// is the human's identifier; Attrs are their governance attributes (role,
+// department, delegated spend limit, MFA) as authored upstream. Rego reads
+// input.user.attrs.* to enforce the user-access layer, e.g.:
+//
+//	deny if {
+//	    to_number(input.action.amount) > to_number(input.user.attrs.spend)
+//	}
+//
+// Nil for autonomous agent calls (no delegating user).
+type InputUser struct {
+	Subject string            `json:"subject,omitempty"`
+	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
 // InputIntent is the intent fields the policy can read.

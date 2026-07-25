@@ -25,6 +25,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
+	"github.com/IntentGate-app/intentgate-gateway/internal/obo"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
 	"github.com/IntentGate-app/intentgate-gateway/internal/payloads"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
@@ -44,6 +45,12 @@ type MCPHandlerConfig struct {
 	// MasterKey is the HMAC key for capability tokens. May be nil only
 	// when RequireCapability is false (dev mode).
 	MasterKey []byte
+	// OBOKey is the HMAC key for on-behalf-of tokens. When set, a request
+	// carrying an X-IntentGate-OBO header has its delegating human principal
+	// verified and surfaced to policy (input.user) so the user-access layer
+	// can enforce. When nil, OBO is disabled: a request that still presents an
+	// OBO header is rejected (fail closed) rather than silently ignored.
+	OBOKey []byte
 	// RequireCapability rejects requests that don't carry a valid
 	// capability token. When false (default in dev), missing tokens are
 	// allowed through with a warning logged.
@@ -1331,7 +1338,11 @@ type capabilityCheckResult struct {
 	// (intent, policy, budget) can read its caveats. nil when no token
 	// was supplied.
 	token *capability.Token
-	err   error
+	// user is the verified delegating human principal (on-behalf-of), set
+	// when the request carried a valid X-IntentGate-OBO token. nil for
+	// autonomous agent calls. Surfaced to the policy stage as input.user.
+	user *obo.Principal
+	err  error
 }
 
 // intentCheckResult bundles what the intent stage learned.
@@ -1818,6 +1829,24 @@ func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string, eastWest b
 	// token above; and expiry, agent-lock, not-before, and max-calls caveats
 	// inside Check. A forged, halted, revoked, expired, or wrong-subject
 	// token is still rejected.
+	// On-behalf-of: if the agent forwarded a signed OBO token, verify it and
+	// carry the delegating human principal forward so the policy stage can
+	// enforce the user-access layer. A present-but-invalid OBO header is a
+	// hard failure — it is never silently downgraded to "no user".
+	var user *obo.Principal
+	if raw := r.Header.Get("X-IntentGate-OBO"); raw != "" {
+		if len(h.cfg.OBOKey) == 0 {
+			return capabilityCheckResult{agentID: tok.Subject, token: tok,
+				err: capError("on-behalf-of token presented but gateway has no OBO key configured")}
+		}
+		p, oerr := obo.Verify(h.cfg.OBOKey, raw)
+		if oerr != nil {
+			return capabilityCheckResult{agentID: tok.Subject, token: tok,
+				err: capError("invalid on-behalf-of token: " + oerr.Error())}
+		}
+		user = p
+	}
+
 	if err := tok.Check(capability.RequestContext{
 		AgentID:  tok.Subject,
 		Tool:     tool,
@@ -1829,7 +1858,7 @@ func (h *mcpHandler) runCapabilityCheck(r *http.Request, tool string, eastWest b
 	if eastWest {
 		summary = "ok (east-west; north-south tool scope deferred to east-west policy)"
 	}
-	return capabilityCheckResult{agentID: tok.Subject, token: tok, summary: summary}
+	return capabilityCheckResult{agentID: tok.Subject, token: tok, user: user, summary: summary}
 }
 
 // runIntentCheck reads the X-Intent-Prompt header and asks the
@@ -1919,6 +1948,12 @@ func (h *mcpHandler) runPolicyCheck(
 				}
 			}
 		}
+	}
+	// Surface the delegating human principal (from a verified OBO token) so
+	// policy can enforce the user-access layer — e.g. a per-user delegated
+	// spend ceiling on input.user.attrs.spend. Nil on autonomous agent calls.
+	if cap.user != nil {
+		in.User = &policy.InputUser{Subject: cap.user.OnBehalfOf, Attrs: cap.user.Attrs}
 	}
 	if intent.intent != nil {
 		in.Intent = &policy.InputIntent{

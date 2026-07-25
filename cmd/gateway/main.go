@@ -1266,6 +1266,7 @@ func main() {
 		Logger:                logger,
 		Version:               version,
 		MasterKey:             masterKey,
+		OBOKey:                []byte(os.Getenv("INTENTGATE_OBO_KEY")),
 		RequireCapability:     requireCap,
 		Extractor:             extractorClient,
 		RequireIntent:         requireIntent,
