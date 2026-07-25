@@ -166,6 +166,28 @@ const (
 	// allowed_mcp_servers attribute straight into the signed token, so the
 	// gateway enforces server scope without reading the Pro DB.
 	CaveatMcpAllow = "mcp_allow"
+	// CaveatRateLimit — the agent may make at most RatePerMin tool calls per
+	// rolling minute. Like [CaveatMaxCalls], enforcement needs the persistent
+	// counter (internal/velocity) and happens in the velocity stage, NOT in
+	// capability.Check; the capability layer accepts this caveat as valid so
+	// signed tokens carrying a rate cap aren't rejected here. The signed
+	// presence stops an agent stripping or widening its own rate cap. Lets the
+	// Pro console bake an agent's rate_limit_per_min attribute into the token.
+	CaveatRateLimit = "rate_limit"
+	// CaveatMaxCost — the summed monetary magnitude of this agent's calls in a
+	// rolling minute must stay at or below MaxCents. Informational at the
+	// capability stage (same reasoning as CaveatRateLimit); enforced by the
+	// velocity stage which consults the persistent spend counter. Lets the
+	// console bake max_execution_cost_usd (converted to cents) into the token.
+	CaveatMaxCost = "max_cost"
+	// CaveatRiskMax — the caller's runtime risk score must be at or below
+	// RiskMax. Unlike rate/cost this IS enforced inline in capability.Check
+	// (it needs no persistent state): the handler supplies the live score via
+	// [RequestContext.Risk] and the caveat denies when it exceeds the ceiling.
+	// A RiskMax of 0 disables the gate (no ceiling). Lets the console bake a
+	// per-agent risk ceiling into the token so a drifting/high-risk agent is
+	// contained without a policy round-trip.
+	CaveatRiskMax = "risk_max"
 )
 
 // Caveat is a structured restriction recorded in a token's chain.
@@ -200,6 +222,14 @@ type Caveat struct {
 	// omitempty keeps it absent from the canonical bytes of every other caveat
 	// type, so adding this field does not change any existing token signature.
 	Servers []string `json:"servers,omitempty"`
+	// RatePerMin is the per-rolling-minute call cap for a [CaveatRateLimit]
+	// caveat (0 = no cap). MaxCents is the per-rolling-minute spend cap in
+	// cents for a [CaveatMaxCost] caveat (0 = no cap). RiskMax is the caller
+	// risk ceiling for a [CaveatRiskMax] caveat (0 = no ceiling). All are
+	// omitempty so they never alter the canonical bytes of other caveat types.
+	RatePerMin int   `json:"rate_per_min,omitempty"`
+	MaxCents   int64 `json:"max_cents,omitempty"`
+	RiskMax    int   `json:"risk_max,omitempty"`
 }
 
 // canonicalPayload returns the bytes that seed the HMAC chain. It

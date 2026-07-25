@@ -25,6 +25,12 @@ type RequestContext struct {
 	Tool     string
 	Now      time.Time
 	EastWest bool
+	// Risk is the caller's live runtime risk score (0–100) supplied by the
+	// handler for [CaveatRiskMax] evaluation. Zero means "no score available"
+	// and never trips a risk ceiling — the gate fails open on a missing score
+	// by design, because a risk_max caveat is a containment ceiling, not the
+	// primary control. Populate it from the agent's current risk signal.
+	Risk int
 }
 
 // Check evaluates a token's caveats against ctx in order.
@@ -128,6 +134,36 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		}
 		if !matchAnyServer(c.Servers, ctx.Tool) {
 			return fmt.Errorf("tool %q not on an allowed MCP server", ctx.Tool)
+		}
+		return nil
+
+	case CaveatRateLimit:
+		// Informational at this layer: the per-minute call cap is enforced by
+		// the velocity stage against the persistent counter (same split as
+		// max_calls). Accept as valid so a signed rate cap isn't rejected here.
+		if c.RatePerMin < 0 {
+			return errors.New("rate_limit caveat has negative rate_per_min value")
+		}
+		return nil
+
+	case CaveatMaxCost:
+		// Informational at this layer: the per-minute spend cap is enforced by
+		// the velocity stage against the persistent spend counter.
+		if c.MaxCents < 0 {
+			return errors.New("max_cost caveat has negative max_cents value")
+		}
+		return nil
+
+	case CaveatRiskMax:
+		// Enforced inline — needs no persistent state, only the live score the
+		// handler supplies via ctx.Risk. Ceiling 0 disables the gate; a zero
+		// ctx.Risk (no score available) never trips it, so the gate fails open
+		// on a missing score by design.
+		if c.RiskMax < 0 {
+			return errors.New("risk_max caveat has negative risk_max value")
+		}
+		if c.RiskMax > 0 && ctx.Risk > c.RiskMax {
+			return fmt.Errorf("caller risk %d exceeds token ceiling %d", ctx.Risk, c.RiskMax)
 		}
 		return nil
 
