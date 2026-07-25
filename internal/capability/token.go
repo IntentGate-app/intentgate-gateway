@@ -158,6 +158,14 @@ const (
 	// [Token.CanCall]. The signed presence of the caveat ensures a holder
 	// cannot strip or widen its own east-west allowance.
 	CaveatCalleeAllow = "callee_allow"
+	// CaveatMcpAllow — the request tool must belong to one of the allowed MCP
+	// servers listed in Servers. A tool "belongs" to server S when its name
+	// equals S or is prefixed "S.", "S:" or "S/" (e.g. "sap.invoice.pay"
+	// belongs to "sap"). North-south only, like tool_allow; skipped for
+	// east-west calls. This lets the Pro console bake an agent's
+	// allowed_mcp_servers attribute straight into the signed token, so the
+	// gateway enforces server scope without reading the Pro DB.
+	CaveatMcpAllow = "mcp_allow"
 )
 
 // Caveat is a structured restriction recorded in a token's chain.
@@ -188,6 +196,10 @@ type Caveat struct {
 	// CalleeZones is the list of callee zones this token may call in an
 	// agent-to-agent call. Only meaningful when Type is [CaveatCalleeAllow].
 	CalleeZones []string `json:"callee_zones,omitempty"`
+	// Servers is the allowed MCP server list for a [CaveatMcpAllow] caveat.
+	// omitempty keeps it absent from the canonical bytes of every other caveat
+	// type, so adding this field does not change any existing token signature.
+	Servers []string `json:"servers,omitempty"`
 }
 
 // canonicalPayload returns the bytes that seed the HMAC chain. It

@@ -3,6 +3,8 @@ package capability
 import (
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 	"time"
 )
 
@@ -81,7 +83,7 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		if ctx.EastWest {
 			return nil
 		}
-		if !contains(c.Tools, ctx.Tool) {
+		if !matchAnyTool(c.Tools, ctx.Tool) {
 			return fmt.Errorf("tool %q not in allowed set", ctx.Tool)
 		}
 		return nil
@@ -90,7 +92,7 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		if ctx.EastWest {
 			return nil
 		}
-		if contains(c.Tools, ctx.Tool) {
+		if matchAnyTool(c.Tools, ctx.Tool) {
 			return fmt.Errorf("tool %q is forbidden", ctx.Tool)
 		}
 		return nil
@@ -114,6 +116,18 @@ func evalCaveat(c Caveat, ctx RequestContext, now time.Time) error {
 		// rule fires.
 		if c.StepUpAt < 0 {
 			return errors.New("step_up caveat has negative step_up_at value")
+		}
+		return nil
+
+	case CaveatMcpAllow:
+		// North-south server scope. Like tool_allow it does not gate an
+		// east-west (agent-to-agent) call — the callee is authorized by the
+		// zone policy and callee-allow, not by MCP server membership.
+		if ctx.EastWest {
+			return nil
+		}
+		if !matchAnyServer(c.Servers, ctx.Tool) {
+			return fmt.Errorf("tool %q not on an allowed MCP server", ctx.Tool)
 		}
 		return nil
 
@@ -161,6 +175,47 @@ func (t *Token) CanCall(calleeAgent, calleeZone string) (bool, string) {
 func contains(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// matchAnyTool reports whether tool matches any of the patterns. A pattern
+// may use shell-style globs ("read_*", "list_*"); a pattern with no glob
+// metacharacters is compared for exact equality, so this stays backward
+// compatible with existing exact-string tool_allow / tool_deny caveats. It
+// only affects caveat evaluation, never the signed token bytes, so it does
+// not change any existing token's signature. This lets the Pro console
+// express per-agent tool scope (allowed_tool_schemas) as globs.
+func matchAnyTool(patterns []string, tool string) bool {
+	for _, p := range patterns {
+		if p == tool {
+			return true
+		}
+		if strings.ContainsAny(p, "*?[") {
+			if ok, err := path.Match(p, tool); err == nil && ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchAnyServer reports whether tool belongs to any of the allowed MCP
+// servers. A tool belongs to server S when it equals S or is prefixed "S.",
+// "S:" or "S/" — so "sap" matches "sap.invoice.pay" but not "saphana.read".
+// This is how the console's allowed_mcp_servers attribute is enforced once
+// baked into a mcp_allow caveat, without the gateway reading the Pro DB.
+func matchAnyServer(servers []string, tool string) bool {
+	for _, s := range servers {
+		if s == "" {
+			continue
+		}
+		if tool == s ||
+			strings.HasPrefix(tool, s+".") ||
+			strings.HasPrefix(tool, s+":") ||
+			strings.HasPrefix(tool, s+"/") {
 			return true
 		}
 	}
