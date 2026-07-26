@@ -40,5 +40,6 @@ var (
 	_ Adapter = (*OTLPEmitter)(nil)
 	_ Adapter = (*WebhookEmitter)(nil)
 	_ Adapter = (*KafkaEmitter)(nil)
+	_ Adapter = (*KinesisEmitter)(nil)
 	_ Adapter = (*ServiceNowEmitter)(nil)
 )

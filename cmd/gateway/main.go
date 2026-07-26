@@ -402,6 +402,13 @@ func main() {
 	// on-prem object stores). Leave empty for real AWS S3.
 	s3Endpoint := envOr("INTENTGATE_SIEM_S3_ENDPOINT", "")
 	s3ForcePathStyle := envOr("INTENTGATE_SIEM_S3_FORCE_PATH_STYLE", "") == "true"
+
+	// AWS Kinesis Data Streams: native per-cloud streaming target. The stream
+	// name alone enables it; credentials come from the default AWS chain.
+	kinesisStream := envOr("INTENTGATE_SIEM_KINESIS_STREAM", "")
+	kinesisRegion := envOr("INTENTGATE_SIEM_KINESIS_REGION", "")
+	kinesisEndpoint := envOr("INTENTGATE_SIEM_KINESIS_ENDPOINT", "")
+	kinesisEvents := envOr("INTENTGATE_SIEM_KINESIS_EVENTS", "")
 	// Webhook fan-out (Pro v2 #3). URL is the operator-configured
 	// receiver — typically a console-pro endpoint that re-routes
 	// per-tenant to Slack / Teams / PagerDuty. Empty disables the
@@ -862,6 +869,10 @@ func main() {
 		kafkaSASLUser:        kafkaSASLUser,
 		kafkaSASLPass:        kafkaSASLPass,
 		kafkaEvents:          kafkaEvents,
+		kinesisStream:        kinesisStream,
+		kinesisRegion:        kinesisRegion,
+		kinesisEndpoint:      kinesisEndpoint,
+		kinesisEvents:        kinesisEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1884,6 +1895,12 @@ type siemEnv struct {
 	kafkaSASLUser string
 	kafkaSASLPass string
 	kafkaEvents   string
+	// AWS Kinesis Data Streams adapter (native per-cloud streaming, async).
+	// Credentials come from the default AWS chain (env / IRSA / instance role).
+	kinesisStream   string
+	kinesisRegion   string
+	kinesisEndpoint string
+	kinesisEvents   string
 	// ServiceNow GRC/SIR/ITSM adapter (configurable target, async).
 	snInstanceURL     string
 	snTarget          string
@@ -2141,6 +2158,34 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"bucket", env.s3Bucket,
 			"prefix", env.s3Prefix,
 			"region", env.s3Region)
+	}
+
+	// AWS Kinesis Data Streams (native per-cloud streaming, async downstream).
+	// Stream name alone enables it; the event-mode filter matches the other
+	// streaming sinks so an operator can send all decisions or just findings.
+	if env.kinesisStream != "" {
+		em, err := siem.NewKinesisEmitter(siem.KinesisConfig{
+			StreamName: env.kinesisStream,
+			Region:     env.kinesisRegion,
+			Endpoint:   env.kinesisEndpoint,
+			Logger:     logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("kinesis: %w", err)
+		}
+		mode := siem.ParseEventMode(env.kinesisEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, mode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "kinesis")
+		logger.Info("SIEM emitter: kinesis",
+			"stream", env.kinesisStream,
+			"region", env.kinesisRegion,
+			"events", string(mode))
 	}
 
 	desc := "none"
