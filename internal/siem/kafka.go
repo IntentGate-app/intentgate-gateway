@@ -41,6 +41,13 @@ type KafkaConfig struct {
 	// (required by most managed Kafka). Never logged.
 	SASLUser string
 	SASLPass string
+	// Name overrides the adapter label shown in logs and the admin status
+	// (default "kafka"). A managed Kafka-compatible bus that is a first-class
+	// cloud product in its own right, such as Tencent CKafka or Alibaba
+	// ApsaraMQ for Kafka, sets this so operators see the real destination
+	// ("tencent") rather than the generic transport. The wire protocol is
+	// identical; only the label differs.
+	Name string
 	// Logger receives drop / error notices. nil falls back to slog.Default.
 	Logger *slog.Logger
 }
@@ -96,10 +103,14 @@ func NewKafkaEmitter(cfg KafkaConfig) (*KafkaEmitter, error) {
 		return nil, fmt.Errorf("siem/kafka: new client: %w", err)
 	}
 
+	name := cfg.Name
+	if name == "" {
+		name = "kafka"
+	}
 	ke := &KafkaEmitter{
 		cfg:   cfg,
 		cl:    cl,
-		name:  "kafka",
+		name:  name,
 		label: strings.Join(cfg.Brokers, ",") + " → " + cfg.Topic,
 	}
 	ke.be = newBatchEmitter(batchConfig{

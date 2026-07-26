@@ -409,6 +409,14 @@ func main() {
 	kinesisRegion := envOr("INTENTGATE_SIEM_KINESIS_REGION", "")
 	kinesisEndpoint := envOr("INTENTGATE_SIEM_KINESIS_ENDPOINT", "")
 	kinesisEvents := envOr("INTENTGATE_SIEM_KINESIS_EVENTS", "")
+
+	// Tencent Cloud CKafka: the bootstrap servers of a CKafka instance plus its
+	// SASL/PLAIN credentials. Topic defaults in loadSIEM when unset.
+	tencentBrokers := envOr("INTENTGATE_SIEM_TENCENT_BROKERS", "")
+	tencentTopic := envOr("INTENTGATE_SIEM_TENCENT_TOPIC", "")
+	tencentSASLUser := envOr("INTENTGATE_SIEM_TENCENT_SASL_USER", "")
+	tencentSASLPass := envOr("INTENTGATE_SIEM_TENCENT_SASL_PASSWORD", "")
+	tencentEvents := envOr("INTENTGATE_SIEM_TENCENT_EVENTS", "")
 	// Webhook fan-out (Pro v2 #3). URL is the operator-configured
 	// receiver — typically a console-pro endpoint that re-routes
 	// per-tenant to Slack / Teams / PagerDuty. Empty disables the
@@ -873,6 +881,11 @@ func main() {
 		kinesisRegion:        kinesisRegion,
 		kinesisEndpoint:      kinesisEndpoint,
 		kinesisEvents:        kinesisEvents,
+		tencentBrokers:       tencentBrokers,
+		tencentTopic:         tencentTopic,
+		tencentSASLUser:      tencentSASLUser,
+		tencentSASLPass:      tencentSASLPass,
+		tencentEvents:        tencentEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1901,6 +1914,14 @@ type siemEnv struct {
 	kinesisRegion   string
 	kinesisEndpoint string
 	kinesisEvents   string
+	// Tencent Cloud CKafka adapter (native per-cloud streaming, async). CKafka
+	// is Tencent's managed Kafka-compatible service, so this reuses the Kafka
+	// producer with TLS + SASL on by default and a "tencent" label.
+	tencentBrokers  string
+	tencentTopic    string
+	tencentSASLUser string
+	tencentSASLPass string
+	tencentEvents   string
 	// ServiceNow GRC/SIR/ITSM adapter (configurable target, async).
 	snInstanceURL     string
 	snTarget          string
@@ -2185,6 +2206,42 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 		logger.Info("SIEM emitter: kinesis",
 			"stream", env.kinesisStream,
 			"region", env.kinesisRegion,
+			"events", string(mode))
+	}
+
+	// Tencent Cloud CKafka (native per-cloud streaming, async downstream).
+	// CKafka speaks the Kafka protocol, so this is the Kafka producer with a
+	// "tencent" label and TLS + SASL on by default, matching how a CKafka
+	// instance is reached. Bootstrap brokers alone enable it.
+	if env.tencentBrokers != "" {
+		topic := env.tencentTopic
+		if topic == "" {
+			topic = "intentgate.audit.v1"
+		}
+		em, err := siem.NewKafkaEmitter(siem.KafkaConfig{
+			Name:     "tencent",
+			Brokers:  splitCSV(env.tencentBrokers),
+			Topic:    topic,
+			TLS:      true,
+			SASLUser: env.tencentSASLUser,
+			SASLPass: env.tencentSASLPass,
+			Logger:   logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("tencent ckafka: %w", err)
+		}
+		mode := siem.ParseEventMode(env.tencentEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, mode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "tencent")
+		logger.Info("SIEM emitter: tencent ckafka",
+			"brokers", env.tencentBrokers,
+			"topic", topic,
 			"events", string(mode))
 	}
 
