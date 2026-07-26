@@ -417,6 +417,28 @@ func main() {
 	tencentSASLUser := envOr("INTENTGATE_SIEM_TENCENT_SASL_USER", "")
 	tencentSASLPass := envOr("INTENTGATE_SIEM_TENCENT_SASL_PASSWORD", "")
 	tencentEvents := envOr("INTENTGATE_SIEM_TENCENT_EVENTS", "")
+
+	// AWS EventBridge: bus name alone enables it; credentials from the AWS chain.
+	eventBridgeBus := envOr("INTENTGATE_SIEM_EVENTBRIDGE_BUS", "")
+	eventBridgeSource := envOr("INTENTGATE_SIEM_EVENTBRIDGE_SOURCE", "")
+	eventBridgeDetailType := envOr("INTENTGATE_SIEM_EVENTBRIDGE_DETAIL_TYPE", "")
+	eventBridgeRegion := envOr("INTENTGATE_SIEM_EVENTBRIDGE_REGION", "")
+	eventBridgeEndpoint := envOr("INTENTGATE_SIEM_EVENTBRIDGE_ENDPOINT", "")
+	eventBridgeEvents := envOr("INTENTGATE_SIEM_EVENTBRIDGE_EVENTS", "")
+
+	// AWS Data Firehose: delivery stream name enables it.
+	firehoseStream := envOr("INTENTGATE_SIEM_FIREHOSE_STREAM", "")
+	firehoseRegion := envOr("INTENTGATE_SIEM_FIREHOSE_REGION", "")
+	firehoseEndpoint := envOr("INTENTGATE_SIEM_FIREHOSE_ENDPOINT", "")
+	firehoseEvents := envOr("INTENTGATE_SIEM_FIREHOSE_EVENTS", "")
+
+	// GCP Pub/Sub: project + topic enable it. Token from env, else the GCP
+	// metadata server (workload identity).
+	pubsubProject := envOr("INTENTGATE_SIEM_PUBSUB_PROJECT", "")
+	pubsubTopic := envOr("INTENTGATE_SIEM_PUBSUB_TOPIC", "")
+	pubsubToken := envOr("INTENTGATE_SIEM_PUBSUB_TOKEN", "")
+	pubsubEndpoint := envOr("INTENTGATE_SIEM_PUBSUB_ENDPOINT", "")
+	pubsubEvents := envOr("INTENTGATE_SIEM_PUBSUB_EVENTS", "")
 	// Webhook fan-out (Pro v2 #3). URL is the operator-configured
 	// receiver — typically a console-pro endpoint that re-routes
 	// per-tenant to Slack / Teams / PagerDuty. Empty disables the
@@ -886,6 +908,21 @@ func main() {
 		tencentSASLUser:      tencentSASLUser,
 		tencentSASLPass:      tencentSASLPass,
 		tencentEvents:        tencentEvents,
+		eventBridgeBus:        eventBridgeBus,
+		eventBridgeSource:     eventBridgeSource,
+		eventBridgeDetailType: eventBridgeDetailType,
+		eventBridgeRegion:     eventBridgeRegion,
+		eventBridgeEndpoint:   eventBridgeEndpoint,
+		eventBridgeEvents:     eventBridgeEvents,
+		firehoseStream:        firehoseStream,
+		firehoseRegion:        firehoseRegion,
+		firehoseEndpoint:      firehoseEndpoint,
+		firehoseEvents:        firehoseEvents,
+		pubsubProject:         pubsubProject,
+		pubsubTopic:           pubsubTopic,
+		pubsubToken:           pubsubToken,
+		pubsubEndpoint:        pubsubEndpoint,
+		pubsubEvents:          pubsubEvents,
 	})
 	if err != nil {
 		logger.Error("failed to initialize SIEM emitters", "err", err)
@@ -1922,6 +1959,24 @@ type siemEnv struct {
 	tencentSASLUser string
 	tencentSASLPass string
 	tencentEvents   string
+	// AWS EventBridge adapter (native per-cloud event bus, async).
+	eventBridgeBus        string
+	eventBridgeSource     string
+	eventBridgeDetailType string
+	eventBridgeRegion     string
+	eventBridgeEndpoint   string
+	eventBridgeEvents     string
+	// AWS Data Firehose adapter (native managed delivery to S3/Splunk/etc).
+	firehoseStream   string
+	firehoseRegion   string
+	firehoseEndpoint string
+	firehoseEvents   string
+	// GCP Pub/Sub adapter (native per-cloud streaming over REST, async).
+	pubsubProject  string
+	pubsubTopic    string
+	pubsubToken    string
+	pubsubEndpoint string
+	pubsubEvents   string
 	// ServiceNow GRC/SIR/ITSM adapter (configurable target, async).
 	snInstanceURL     string
 	snTarget          string
@@ -2243,6 +2298,78 @@ func loadSIEM(logger *slog.Logger, env siemEnv) ([]audit.Emitter, []siem.StatusR
 			"brokers", env.tencentBrokers,
 			"topic", topic,
 			"events", string(mode))
+	}
+
+	// AWS EventBridge (native per-cloud event bus, async downstream).
+	if env.eventBridgeBus != "" {
+		em, err := siem.NewEventBridgeEmitter(siem.EventBridgeConfig{
+			EventBusName: env.eventBridgeBus,
+			Source:       env.eventBridgeSource,
+			DetailType:   env.eventBridgeDetailType,
+			Region:       env.eventBridgeRegion,
+			Endpoint:     env.eventBridgeEndpoint,
+			Logger:       logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("eventbridge: %w", err)
+		}
+		mode := siem.ParseEventMode(env.eventBridgeEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, mode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "eventbridge")
+		logger.Info("SIEM emitter: eventbridge", "bus", env.eventBridgeBus, "events", string(mode))
+	}
+
+	// AWS Data Firehose (native managed delivery, async downstream).
+	if env.firehoseStream != "" {
+		em, err := siem.NewFirehoseEmitter(siem.FirehoseConfig{
+			DeliveryStreamName: env.firehoseStream,
+			Region:             env.firehoseRegion,
+			Endpoint:           env.firehoseEndpoint,
+			Logger:             logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("firehose: %w", err)
+		}
+		mode := siem.ParseEventMode(env.firehoseEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, mode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "firehose")
+		logger.Info("SIEM emitter: firehose", "stream", env.firehoseStream, "events", string(mode))
+	}
+
+	// GCP Pub/Sub (native per-cloud streaming over REST, async downstream).
+	if env.pubsubProject != "" && env.pubsubTopic != "" {
+		em, err := siem.NewPubSubEmitter(siem.PubSubConfig{
+			ProjectID:   env.pubsubProject,
+			Topic:       env.pubsubTopic,
+			StaticToken: env.pubsubToken,
+			Endpoint:    env.pubsubEndpoint,
+			Logger:      logger,
+		})
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("pubsub: %w", err)
+		}
+		mode := siem.ParseEventMode(env.pubsubEvents, defaultMode)
+		routed := siem.NewRoutingEmitter(em, mode)
+		emitters = append(emitters, routed)
+		if sr, ok := routed.(siem.StatusReporter); ok {
+			reporters = append(reporters, sr)
+		} else {
+			reporters = append(reporters, em)
+		}
+		labels = append(labels, "pubsub")
+		logger.Info("SIEM emitter: pubsub", "project", env.pubsubProject, "topic", env.pubsubTopic, "events", string(mode))
 	}
 
 	desc := "none"

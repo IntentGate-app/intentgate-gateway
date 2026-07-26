@@ -41,5 +41,8 @@ var (
 	_ Adapter = (*WebhookEmitter)(nil)
 	_ Adapter = (*KafkaEmitter)(nil)
 	_ Adapter = (*KinesisEmitter)(nil)
+	_ Adapter = (*EventBridgeEmitter)(nil)
+	_ Adapter = (*FirehoseEmitter)(nil)
+	_ Adapter = (*PubSubEmitter)(nil)
 	_ Adapter = (*ServiceNowEmitter)(nil)
 )
