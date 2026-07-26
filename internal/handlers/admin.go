@@ -75,6 +75,10 @@ type AdminConfig struct {
 	// /v1/admin/audit endpoint. Optional; when nil, that endpoint is
 	// not registered.
 	AuditStore auditstore.Store
+	// AuditStream is the in-memory fan-out that backs the live decision
+	// stream at /v1/admin/audit/stream (Server-Sent Events). Optional;
+	// when nil, that endpoint is not registered.
+	AuditStream *audit.StreamHub
 	// SIEMReporters surfaces the configured SIEM-emitter statuses on
 	// /v1/admin/integrations. Nil / empty slice yields an empty
 	// integrations list rather than a 404 — the console renders that

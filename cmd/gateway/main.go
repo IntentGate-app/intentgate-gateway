@@ -924,6 +924,16 @@ func main() {
 			"block_threshold", riskBlockThreshold)
 	}
 
+	// Live audit stream hub (Server-Sent Events). A non-blocking peer in the
+	// audit fan-out: Emit appends to a bounded in-memory ring and broadcasts to
+	// any connected SSE subscribers, dropping a frame for a slow client rather
+	// than ever blocking the decision path. It powers the Runtime Monitor live
+	// stream at GET /v1/admin/audit/stream. Always on and cheap: when nobody is
+	// connected it is just a ring buffer nothing reads from.
+	auditStream := audit.NewStreamHub(1024)
+	auditEmitter = audit.NewFanOut(auditEmitter, auditStream)
+	auditDesc = auditDesc + "+stream(sse)"
+
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1275,6 +1285,7 @@ func main() {
 		RequireBudget:         requireBudget,
 		Audit:                 auditEmitter,
 		AuditStore:            auditStore,
+		AuditStream:           auditStream,
 		SIEMReporters:         siemReporters,
 		Upstream:              upstreamClient,
 		Credentials:           credStore,

@@ -81,6 +81,10 @@ type Config struct {
 	// (the route is not registered, so /v1/admin/audit returns 404 on
 	// older / lighter deployments).
 	AuditStore auditstore.Store
+	// AuditStream is the in-memory fan-out that backs the live decision
+	// stream at /v1/admin/audit/stream (Server-Sent Events). nil means
+	// the stream route is not registered.
+	AuditStream *audit.StreamHub
 	// SIEMReporters provides the read-only status snapshots the
 	// /v1/admin/integrations endpoint surfaces. One reporter per
 	// configured SIEM destination; empty slice means no SIEM
@@ -415,6 +419,14 @@ func New(cfg Config) *http.Server {
 		// Draft a segmentation config from a plain-language description
 		// (deterministic parser; the console's LLM assistant falls back here).
 		mux.Handle("POST /v1/admin/segmentation/draft", handlers.NewAdminSegmentationDraftHandler(adminCfg))
+		// Live decision stream (Server-Sent Events). Independent of the audit
+		// store: it reads the in-memory ring hub, so it powers the Runtime
+		// Monitor live stream even on stdout-only deployments with no
+		// persistence. Registered only when the hub is wired in.
+		if cfg.AuditStream != nil {
+			adminCfg.AuditStream = cfg.AuditStream
+			mux.Handle("GET /v1/admin/audit/stream", handlers.NewAdminAuditStreamHandler(adminCfg))
+		}
 		// Audit query is registered only when an AuditStore is wired
 		// in. Older deployments running stdout-only audit get a 404,
 		// which is what the console keys off to fall back to its
