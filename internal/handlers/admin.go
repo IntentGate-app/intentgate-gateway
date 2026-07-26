@@ -290,6 +290,15 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			StepUp      bool     `json:"step_up"`
 			Callees     []string `json:"callees"`
 			CalleeZones []string `json:"callee_zones"`
+			// Composed-policy ceilings the console derives from the effective
+			// policy (tenant ∩ group ∩ agent) and asks the gateway to bake into
+			// the token. All optional; a zero or empty value means "no cap" and
+			// no caveat is added. Servers -> mcp_allow, RatePerMin -> rate_limit,
+			// MaxCents -> max_cost, RiskMax -> risk_max.
+			Servers    []string `json:"servers"`
+			RatePerMin int      `json:"rate_per_min"`
+			MaxCents   int64    `json:"max_cents"`
+			RiskMax    int      `json:"risk_max"`
 			// WithMemorySigningKey opts the response into including
 			// the AAI03 memory-provenance signing key derived from
 			// the master key + this token's jti. Default false —
@@ -364,6 +373,40 @@ func NewAdminMintHandler(cfg AdminConfig) http.Handler {
 			opts.Caveats = append(opts.Caveats, capability.Caveat{
 				Type:     capability.CaveatMaxCalls,
 				MaxCalls: body.MaxCalls,
+			})
+		}
+		// Composed-policy ceilings. Each is added only when set (> 0 / non-empty),
+		// so an unset field never bakes a "0 cap" into the token. The verifier
+		// enforces mcp_allow and risk_max inline and defers rate_limit / max_cost
+		// to the velocity stage; see capability.Check.
+		var servers []string
+		for _, s := range body.Servers {
+			if s = strings.TrimSpace(s); s != "" {
+				servers = append(servers, s)
+			}
+		}
+		if len(servers) > 0 {
+			opts.Caveats = append(opts.Caveats, capability.Caveat{
+				Type:    capability.CaveatMcpAllow,
+				Servers: servers,
+			})
+		}
+		if body.RatePerMin > 0 {
+			opts.Caveats = append(opts.Caveats, capability.Caveat{
+				Type:       capability.CaveatRateLimit,
+				RatePerMin: body.RatePerMin,
+			})
+		}
+		if body.MaxCents > 0 {
+			opts.Caveats = append(opts.Caveats, capability.Caveat{
+				Type:     capability.CaveatMaxCost,
+				MaxCents: body.MaxCents,
+			})
+		}
+		if body.RiskMax > 0 {
+			opts.Caveats = append(opts.Caveats, capability.Caveat{
+				Type:    capability.CaveatRiskMax,
+				RiskMax: body.RiskMax,
 			})
 		}
 		if body.StepUp {
