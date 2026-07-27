@@ -144,10 +144,13 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -165,6 +168,8 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
+	"github.com/IntentGate-app/intentgate-gateway/internal/bundle"
+	"github.com/IntentGate-app/intentgate-gateway/internal/bundleadapter"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
@@ -1332,6 +1337,41 @@ func main() {
 		}
 	}
 
+	// IntentGrant compiled-authority path (opt-in). When INTENTGRANT_CONTROL_URL
+	// is set, subscribe to the control plane's signed policy-bundle SSE stream,
+	// verify + hot-swap each bundle per subject, enforce it in the MCP handler,
+	// and emit Layer-4 proof. Unset: no-op, the gateway behaves exactly as before.
+	var bundleReg *bundle.BundleRegistry
+	var bundleEval *bundle.DualPathEvaluator
+	if controlURL := os.Getenv("INTENTGRANT_CONTROL_URL"); controlURL != "" {
+		var verifyKey ed25519.PublicKey
+		if pemStr := os.Getenv("INTENTGRANT_VERIFY_KEY"); pemStr != "" {
+			if block, _ := pem.Decode([]byte(pemStr)); block != nil {
+				if pub, perr := x509.ParsePKIXPublicKey(block.Bytes); perr == nil {
+					if ed, ok := pub.(ed25519.PublicKey); ok {
+						verifyKey = ed
+					}
+				}
+			}
+			if verifyKey == nil {
+				logger.Warn("INTENTGRANT_VERIFY_KEY set but not a usable ed25519 PEM key")
+			}
+		}
+		bundleReg = bundle.NewBundleRegistry(verifyKey)
+		if os.Getenv("INTENTGATE_LAB_MODE") == "true" || os.Getenv("INTENTGATE_ENV") == "lab" {
+			bundleReg.AllowUnsigned = true
+		}
+		// Vendor verification already runs as a global handler stage, so the
+		// bundle evaluator passes a nil vendor master here.
+		bundleEval = bundleadapter.NewEvaluator(bundleReg, nil, false, auditEmitter)
+		nodeID := os.Getenv("INTENTGATE_NODE_ID")
+		if nodeID == "" {
+			nodeID = "gateway-1"
+		}
+		go bundle.NewSubscriber(controlURL, nodeID, bundleReg).Run(context.Background())
+		logger.Info("intentgrant bundle subscriber started", "control_url", controlURL, "node", nodeID)
+	}
+
 	srv := server.New(server.Config{
 		Addr:                  addr,
 		Logger:                logger,
@@ -1367,6 +1407,8 @@ func main() {
 		FaultIsolation:        faultIsolator,
 		ActionGuard:           actionGuard,
 		RefVerify:             refVerify,
+		BundleReg:             bundleReg,
+		BundleEval:            bundleEval,
 		Deception:             deceptionDetector,
 		DeceptionReporter:     deceptionReporter,
 		EngagementReporter:    engagementReporter,

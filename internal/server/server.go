@@ -12,6 +12,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/auditstore"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
+	"github.com/IntentGate-app/intentgate-gateway/internal/bundle"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
@@ -207,6 +208,11 @@ type Config struct {
 	// the stage. Constructed at startup from INTENTGATE_REFVERIFY_*.
 	// See internal/refverify.
 	RefVerify *refverify.Verifier
+	// BundleReg / BundleEval enable the IntentGrant compiled-authority path
+	// (signed policy bundles, dual-path evaluation). nil disables it; the
+	// gateway's existing enforcement is unchanged.
+	BundleReg  *bundle.BundleRegistry
+	BundleEval *bundle.DualPathEvaluator
 	// Deception is the optional inline decoy engagement detector. On a
 	// decoy touch it contains (kill switch + token revoke) and blocks.
 	// Constructed at startup from INTENTGATE_DECEPTION_CONFIG_PATH. nil
@@ -326,6 +332,8 @@ func New(cfg Config) *http.Server {
 		FaultIsolation:     cfg.FaultIsolation,
 		ActionGuard:        cfg.ActionGuard,
 		RefVerify:          cfg.RefVerify,
+		BundleReg:          cfg.BundleReg,
+		BundleEval:         cfg.BundleEval,
 		Deception:          cfg.Deception,
 		DeceptionReporter:  cfg.DeceptionReporter,
 		EngagementReporter: cfg.EngagementReporter,
