@@ -16,6 +16,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/approvals"
 	"github.com/IntentGate-app/intentgate-gateway/internal/audit"
 	"github.com/IntentGate-app/intentgate-gateway/internal/budget"
+	"github.com/IntentGate-app/intentgate-gateway/internal/bundle"
 	"github.com/IntentGate-app/intentgate-gateway/internal/capability"
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
@@ -132,6 +133,14 @@ type MCPHandlerConfig struct {
 	// action guard and before the segmentation/policy stages. nil disables
 	// the stage entirely. See internal/refverify.
 	RefVerify *refverify.Verifier
+	// BundleReg / BundleEval wire the IntentGrant compiled-authority path. When
+	// both are non-nil AND a signed policy bundle has been propagated for the
+	// calling subject, the dual-path evaluator decides the call (Path A static
+	// caveats + Path B magnitude/vendor) and emits a Layer-4 ProofRecord. Both
+	// nil, or no bundle for the subject, is a no-op: existing enforcement is
+	// unchanged, so a gateway with no grants published behaves exactly as before.
+	BundleReg  *bundle.BundleRegistry
+	BundleEval *bundle.DualPathEvaluator
 	// Deception is the inline decoy engagement detector. It runs at the
 	// capability stage, before an out-of-scope honey-tool would be denied,
 	// so a decoy touch is caught rather than lost. On a trip it contains
@@ -594,6 +603,28 @@ func (h *mcpHandler) handleToolsCall(ctx context.Context, req *mcp.Request, r *h
 	// when ActionGuard is nil. The session key is the task id (same identifier
 	// the goal-drift binder uses); when absent we fall back to the agent id so
 	// correlation still works within an agent's activity.
+	// Check 3b-pre (OPT-IN): IntentGrant compiled-authority bundle. Enforces the
+	// signed policy bundle propagated for this subject (Path A static caveats +
+	// Path B magnitude/vendor) and emits a Layer-4 ProofRecord. No-op unless a
+	// bundle has been published for the subject, so existing traffic is
+	// unaffected until a grant is compiled and streamed to this node.
+	if bres, governed := h.bundleDecision(ctx, capResult.agentID, params.Name, params.Arguments, r.Header.Get("X-Task-Id")); governed {
+		switch bres.Decision {
+		case bundle.DecisionEscalate:
+			if escResp := h.runApprovalFlow(ctx, r, req, params, capResult, intResult, audit.CheckPolicy, bres.Reason, false, start); escResp != nil {
+				return escResp
+			}
+		case bundle.DecisionDeny, bundle.DecisionRestrict:
+			h.cfg.Logger.Info("mcp tools/call blocked",
+				"tool", params.Name, "check", "intentgrant",
+				"agent", capResult.agentID, "reason", bres.Reason)
+			h.emitAudit(ctx, r, params, capResult, intResult,
+				audit.DecisionBlock, audit.CheckPolicy, "intentgrant bundle: "+bres.Reason, start, 0)
+			return mcp.NewErrorResponse(req.ID, mcp.CodePolicyFailed,
+				"intentgrant policy denied", bres.Reason)
+		}
+	}
+
 	if h.cfg.ActionGuard != nil {
 		agStart := time.Now()
 		agSession := r.Header.Get("X-Task-Id")

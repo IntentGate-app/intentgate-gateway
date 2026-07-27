@@ -65,6 +65,8 @@ func CanonicalForHash(e Event) ([]byte, error) {
 		UpstreamStatus:        e.UpstreamStatus,
 		RequiresStepUp:        e.RequiresStepUp,
 		ElevationID:           e.ElevationID,
+		BundleID:              e.BundleID,
+		BundleDigest:          e.BundleDigest,
 	}
 	return json.Marshal(c)
 }
@@ -125,4 +127,9 @@ type canonicalEvent struct {
 	UpstreamStatus        int      `json:"upstream_status,omitempty"`
 	RequiresStepUp        bool     `json:"requires_step_up,omitempty"`
 	ElevationID           string   `json:"elevation_id,omitempty"`
+	// Appended (not inserted) so old events, which leave these empty, marshal to
+	// byte-identical canonical JSON and keep verifying. New IntentGrant proof
+	// events populate + hash them.
+	BundleID     string `json:"bundle_id,omitempty"`
+	BundleDigest string `json:"bundle_digest,omitempty"`
 }

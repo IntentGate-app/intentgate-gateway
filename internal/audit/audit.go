@@ -206,6 +206,15 @@ type Event struct {
 	// the body was not kept, which is a legitimate posture on its own.
 	ResultStored bool `json:"result_stored,omitempty"`
 
+	// BundleID and BundleDigest bind a decision to the exact compiled IntentGrant
+	// policy bundle that was in force (Layer-4 Proof). First-class and hashed
+	// (see canonical.go), so SIEMs query them as top-level keys and tamper
+	// evidence covers WHICH policy version decided. Empty on non-bundle events;
+	// omitempty keeps pre-migration events byte-identical so their chain still
+	// verifies.
+	BundleID     string `json:"bundle_id,omitempty"`
+	BundleDigest string `json:"bundle_digest,omitempty"`
+
 	// Actor (the AI agent making the call).
 	AgentID   string `json:"agent_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
@@ -330,7 +339,7 @@ func NewEvent(d Decision, tool string) Event {
 	return Event{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
 		EventName:     "intentgate.tool_call",
-		SchemaVersion: "6",
+		SchemaVersion: "7", // v7 adds first-class bundle_id / bundle_digest (Layer-4 Proof)
 		Decision:      d,
 		Tool:          tool,
 	}
