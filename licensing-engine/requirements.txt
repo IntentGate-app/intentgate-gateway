@@ -1,0 +1,3 @@
+cryptography>=42
+# dev
+pytest>=7
