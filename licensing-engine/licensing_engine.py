@@ -133,7 +133,7 @@ class EnterpriseLicensingEngine:
         signing_key: Ed25519PrivateKey,
         commitment: Optional[Commitment] = None,
         state_path: Optional[str] = None,
-        issuer: str = "netgnarus",
+        issuer: str = "intentgate",
     ) -> None:
         self._customer_id = customer_id
         self._key = signing_key
