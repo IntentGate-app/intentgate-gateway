@@ -2,7 +2,9 @@
 
 # ---- build stage ------------------------------------------------------------
 # Pinned to match the toolchain in go.mod. Bump both together.
-FROM golang:1.25-alpine AS build
+# 1.26 carries the stdlib security fixes for GO-2026-5856 (crypto/tls),
+# GO-2026-5039 (net/textproto) and GO-2026-5037 (crypto/x509).
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
