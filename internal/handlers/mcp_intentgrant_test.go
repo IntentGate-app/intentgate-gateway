@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/IntentGate-app/intentgate-gateway/internal/executionoutcome"
 	"github.com/IntentGate-app/intentgate-gateway/internal/intentauthz"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
@@ -169,6 +171,121 @@ func TestIntentGrant_MissingAgentHeader_DeniesLocallyWithoutToolserver(t *testin
 	}
 	if resp.Error == nil || resp.Error.Code != mcp.CodeInvalidParams {
 		t.Fatalf("want CodeInvalidParams, got %+v", resp.Error)
+	}
+}
+
+// outcomesSink is a fake execution-outcomes ingest endpoint that captures each posted body.
+func outcomesSink(t *testing.T) (*httptest.Server, chan map[string]any) {
+	t.Helper()
+	ch := make(chan map[string]any, 4)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		ch <- body
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"outcome":{}}`))
+	}))
+	t.Cleanup(s.Close)
+	return s, ch
+}
+
+func igHandlerWithOutcomes(t *testing.T, pdpURL, upstreamURL, outcomesURL string) http.Handler {
+	t.Helper()
+	az, err := intentauthz.New(intentauthz.Config{URL: pdpURL})
+	if err != nil {
+		t.Fatalf("intentauthz.New: %v", err)
+	}
+	var up *upstream.Client
+	if upstreamURL != "" {
+		if up, err = upstream.New(upstream.Config{URL: upstreamURL}); err != nil {
+			t.Fatalf("upstream.New: %v", err)
+		}
+	}
+	var exo *executionoutcome.Client
+	if outcomesURL != "" {
+		if exo, err = executionoutcome.New(executionoutcome.Config{URL: outcomesURL}); err != nil {
+			t.Fatalf("executionoutcome.New: %v", err)
+		}
+	}
+	return NewIntentGrantMCPHandler(IntentGrantMCPConfig{Authz: az, Upstream: up, ExecutionOutcomes: exo})
+}
+
+func waitOutcome(t *testing.T, ch chan map[string]any) map[string]any {
+	t.Helper()
+	select {
+	case o := <-ch:
+		return o
+	case <-time.After(2 * time.Second):
+		t.Fatal("no execution outcome emitted")
+		return nil
+	}
+}
+
+func TestIntentGrant_Allow_EmitsExecutedOutcome(t *testing.T) {
+	up, _ := countingUpstream(t)
+	pdp := fakePDP(t, "ALLOW", "GRANT_ACTIVE", "DEC-000001", "IG-000001")
+	sink, ch := outcomesSink(t)
+	h := igHandlerWithOutcomes(t, pdp.URL, up.URL, sink.URL)
+
+	_ = igCall(t, h, "agent-7", "deploy-tool")
+
+	o := waitOutcome(t, ch)
+	if o["decision_id"] != "DEC-000001" {
+		t.Errorf("decision_id: want DEC-000001, got %v", o["decision_id"])
+	}
+	if o["status"] != executionoutcome.StatusExecuted {
+		t.Errorf("status: want EXECUTED, got %v", o["status"])
+	}
+	if o["upstream_status"] != float64(200) {
+		t.Errorf("upstream_status: want 200, got %v", o["upstream_status"])
+	}
+	if h, _ := o["result_hash"].(string); len(h) != 64 {
+		t.Errorf("result_hash: want a 64-hex sha256, got %v", o["result_hash"])
+	}
+	detail, _ := o["detail"].(map[string]any)
+	if detail["tool"] != "deploy-tool" {
+		t.Errorf("detail.tool: want deploy-tool, got %v", detail)
+	}
+}
+
+func TestIntentGrant_Deny_EmitsBlockedOutcome(t *testing.T) {
+	up, count := countingUpstream(t)
+	pdp := fakePDP(t, "DENY", "NO_GRANT", "DEC-000009", "")
+	sink, ch := outcomesSink(t)
+	h := igHandlerWithOutcomes(t, pdp.URL, up.URL, sink.URL)
+
+	_ = igCall(t, h, "agent-7", "deploy-tool")
+
+	if got := atomic.LoadInt32(count); got != 0 {
+		t.Fatalf("toolserver invoked on DENY: %d", got)
+	}
+	o := waitOutcome(t, ch)
+	if o["status"] != executionoutcome.StatusBlocked {
+		t.Errorf("status: want BLOCKED, got %v", o["status"])
+	}
+	if o["decision_id"] != "DEC-000009" {
+		t.Errorf("decision_id: want DEC-000009, got %v", o["decision_id"])
+	}
+	if _, present := o["upstream_status"]; present {
+		t.Errorf("BLOCKED must carry no upstream_status, got %v", o["upstream_status"])
+	}
+}
+
+func TestIntentGrant_FailClosed_EmitsNoOutcome(t *testing.T) {
+	up, _ := countingUpstream(t)
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	sink, ch := outcomesSink(t)
+	h := igHandlerWithOutcomes(t, deadURL, up.URL, sink.URL)
+
+	_ = igCall(t, h, "agent-7", "deploy-tool")
+
+	// No DEC- exists on a fail-closed, so no EXO- may be emitted.
+	select {
+	case o := <-ch:
+		t.Fatalf("fail-closed must emit no execution outcome, got %v", o)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 

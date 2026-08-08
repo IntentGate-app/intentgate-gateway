@@ -16,6 +16,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/credentials"
 	"github.com/IntentGate-app/intentgate-gateway/internal/deception"
 	"github.com/IntentGate-app/intentgate-gateway/internal/eastwest"
+	"github.com/IntentGate-app/intentgate-gateway/internal/executionoutcome"
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/handlers"
@@ -123,6 +124,15 @@ type Config struct {
 	// IntentGrantTenant is the tenant stamped on emitted observations. It MUST match the
 	// tenant the observations token authenticates as. Required to enable the collector.
 	IntentGrantTenant string
+	// IntentGrantExecutionOutcomesURL, when set alongside IntentGrantAuthorizeURL, turns on
+	// EXO- emission: after a governed DENY (BLOCKED) or an ALLOW forward (EXECUTED/FAILED),
+	// the PEP records the outcome linked to the DEC-. Best-effort, off the decision path.
+	// The tenant is derived by the platform from the token, so none is sent here. Empty
+	// disables emission (enforcement is unchanged).
+	IntentGrantExecutionOutcomesURL string
+	// IntentGrantExecutionOutcomesToken is the bearer presented to the outcomes endpoint;
+	// empty falls back to IntentGrantAuthorizeToken.
+	IntentGrantExecutionOutcomesToken string
 	// Upstream is the configured downstream MCP tool server. nil means
 	// no upstream is configured and the gateway returns its stub allow
 	// for authorized calls. Production deployments always supply one.
@@ -397,11 +407,31 @@ func New(cfg Config) *http.Server {
 						"ingest", cfg.IntentGrantObservationsURL, "tenant", cfg.IntentGrantTenant)
 				}
 			}
+			// Optional EXO- emission: record what happened after each decision (BLOCKED on a
+			// governed DENY, EXECUTED/FAILED on an ALLOW forward). Enforcement is unaffected.
+			var outcomes *executionoutcome.Client
+			if cfg.IntentGrantExecutionOutcomesURL != "" {
+				exoToken := cfg.IntentGrantExecutionOutcomesToken
+				if exoToken == "" {
+					exoToken = cfg.IntentGrantAuthorizeToken
+				}
+				o, oErr := executionoutcome.New(executionoutcome.Config{
+					URL:   cfg.IntentGrantExecutionOutcomesURL,
+					Token: exoToken,
+				})
+				if oErr != nil {
+					logger.Warn("intentgrant execution-outcome emission disabled: invalid config", "err", oErr.Error())
+				} else {
+					outcomes = o
+					logger.Info("intentgrant execution-outcome emission enabled", "sink", cfg.IntentGrantExecutionOutcomesURL)
+				}
+			}
 			mux.Handle("POST /v1/mcp/ig", handlers.NewIntentGrantMCPHandler(handlers.IntentGrantMCPConfig{
-				Logger:    logger,
-				Authz:     azClient,
-				Upstream:  cfg.Upstream,
-				Collector: collector,
+				Logger:            logger,
+				Authz:             azClient,
+				Upstream:          cfg.Upstream,
+				Collector:         collector,
+				ExecutionOutcomes: outcomes,
 			}))
 			logger.Info("intentgrant MCP enforcement path enabled", "route", "POST /v1/mcp/ig")
 		}

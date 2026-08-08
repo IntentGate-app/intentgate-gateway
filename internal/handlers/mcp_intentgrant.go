@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/IntentGate-app/intentgate-gateway/internal/executionoutcome"
 	"github.com/IntentGate-app/intentgate-gateway/internal/intentauthz"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
 	"github.com/IntentGate-app/intentgate-gateway/internal/observations"
@@ -19,6 +20,10 @@ import (
 // path is governed solely by the BA-/IG- chain, so it takes identity from a plain
 // header and resolves it to a canonical EUID in the control plane.
 const DefaultAgentHeader = "X-IntentGate-Agent"
+
+// DefaultTraceHeader is the request-correlation header carried into an ExecutionOutcome's
+// trace_id, so retries / Step-Up continuations of one decision can be tied together.
+const DefaultTraceHeader = "X-Request-Id"
 
 // HeaderDecisionID echoes the control-plane decision id on the response so the
 // proof (DEC-) is retrievable without parsing the JSON-RPC body.
@@ -50,6 +55,16 @@ type IntentGrantMCPConfig struct {
 	Collector *observations.Collector
 	// CollectorTimeout bounds one best-effort emit; zero uses the collector default.
 	CollectorTimeout time.Duration
+	// ExecutionOutcomes, when set, records what happened AFTER a decision (EXO- linked to
+	// the DEC-): BLOCKED on a governed DENY, EXECUTED/FAILED on an ALLOW forward. Emitted
+	// best-effort on a detached goroutine, OFF the decision path — a post failure never
+	// alters the authorization or execution result. A fail-closed (no DEC-) emits nothing.
+	// nil disables outcome recording (enforcement is unchanged).
+	ExecutionOutcomes *executionoutcome.Client
+	// ExecutionOutcomeTimeout bounds one best-effort emit; zero uses the client default.
+	ExecutionOutcomeTimeout time.Duration
+	// TraceHeader overrides the request-correlation header read into an outcome's trace_id.
+	TraceHeader string
 }
 
 // NewIntentGrantMCPHandler returns POST /v1/mcp/ig.
@@ -66,6 +81,9 @@ func NewIntentGrantMCPHandler(cfg IntentGrantMCPConfig) http.Handler {
 	}
 	if cfg.AgentHeader == "" {
 		cfg.AgentHeader = DefaultAgentHeader
+	}
+	if cfg.TraceHeader == "" {
+		cfg.TraceHeader = DefaultTraceHeader
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -155,8 +173,11 @@ func NewIntentGrantMCPHandler(cfg IntentGrantMCPConfig) http.Handler {
 			w.Header().Set(HeaderDecisionID, decision.Record.DecisionID)
 		}
 
+		traceID := r.Header.Get(cfg.TraceHeader)
+
 		if !decision.Allowed() {
-			// Governed DENY. The toolserver is never contacted.
+			// Governed DENY. The toolserver is never contacted → the execution outcome is
+			// BLOCKED (an authorization denial is BLOCKED, never FAILED).
 			cfg.Logger.Warn("intentgrant DENY (blocked before execution)",
 				"tool", params.Name, "agent", agentRef,
 				"reason", decision.Record.ReasonCode, "decision", decision.Record.DecisionID)
@@ -167,6 +188,9 @@ func NewIntentGrantMCPHandler(cfg IntentGrantMCPConfig) http.Handler {
 					"reason":      decision.Record.ReasonCode,
 					"decision_id": decision.Record.DecisionID,
 				}))
+			emitOutcome(cfg, decision.Record.DecisionID, traceID, params.Name, forwardOutcome{
+				status: executionoutcome.StatusBlocked,
+			})
 			return
 		}
 
@@ -174,29 +198,82 @@ func NewIntentGrantMCPHandler(cfg IntentGrantMCPConfig) http.Handler {
 		cfg.Logger.Info("intentgrant ALLOW (forwarding to toolserver)",
 			"tool", params.Name, "agent", agentRef,
 			"grant", strOrEmpty(decision.Record.GrantID), "decision", decision.Record.DecisionID)
-		igForward(w, cfg, r.Context(), req, raw, decision.Record.DecisionID)
+		out := igForward(w, cfg, r.Context(), req, raw, decision.Record.DecisionID)
+		emitOutcome(cfg, decision.Record.DecisionID, traceID, params.Name, out)
 	})
 }
 
-// igForward forwards the exact JSON-RPC body to the toolserver and writes the raw
-// response back. When no upstream is configured the call cannot execute, which for
-// this path is an upstream-unavailable error (never a silent success).
-func igForward(w http.ResponseWriter, cfg IntentGrantMCPConfig, ctx context.Context, req mcp.Request, raw []byte, decisionID string) {
+// forwardOutcome carries what happened when the PEP forwarded an ALLOW to the toolserver,
+// so the caller can record the matching EXO- (EXECUTED on a 2xx, FAILED on an operational
+// failure). It is decision-agnostic: a DENY is recorded directly as BLOCKED.
+type forwardOutcome struct {
+	status         string
+	upstreamStatus *int
+	resultHash     string
+	errorCode      string
+}
+
+// emitOutcome records the execution outcome best-effort on a detached goroutine — OFF the
+// decision path. Never called (and never emits) without a decision_id: a fail-closed with
+// no DEC- must not manufacture a decision relationship.
+func emitOutcome(cfg IntentGrantMCPConfig, decisionID, traceID, tool string, out forwardOutcome) {
+	if cfg.ExecutionOutcomes == nil || decisionID == "" || out.status == "" {
+		return
+	}
+	detail := executionoutcome.Detail{Tool: tool}
+	if out.errorCode != "" {
+		detail.ErrorCode = out.errorCode
+	}
+	o := executionoutcome.Outcome{
+		DecisionID:     decisionID,
+		Status:         out.status,
+		UpstreamStatus: out.upstreamStatus,
+		ResultHash:     out.resultHash,
+		TraceID:        traceID,
+		Detail:         detail,
+	}
+	go func() {
+		to := cfg.ExecutionOutcomeTimeout
+		if to <= 0 {
+			to = executionoutcome.DefaultTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), to)
+		defer cancel()
+		if err := cfg.ExecutionOutcomes.Emit(ctx, o); err != nil {
+			cfg.Logger.Warn("execution outcome emit failed (non-fatal; enforcement unaffected)",
+				"decision", decisionID, "status", o.Status, "err", err.Error())
+		}
+	}()
+}
+
+// igForward forwards the exact JSON-RPC body to the toolserver and writes the raw response
+// back. It returns a forwardOutcome describing what happened so the caller can record the
+// EXO-: EXECUTED with upstream_status + result_hash on a 2xx (the tool actually ran — a
+// JSON-RPC error carried in a 200 body still counts as EXECUTED), FAILED with an error_code
+// on an operational failure (no upstream, transport, timeout, or non-2xx). Writing the HTTP
+// response is unchanged; the outcome is pure evidence, computed off the decision.
+func igForward(w http.ResponseWriter, cfg IntentGrantMCPConfig, ctx context.Context, req mcp.Request, raw []byte, decisionID string) forwardOutcome {
 	if cfg.Upstream == nil {
 		writeRPC(w, mcp.NewErrorResponse(req.ID, mcp.CodeUpstreamUnavailable,
 			"no upstream toolserver configured", map[string]any{"reason": "NO_UPSTREAM"}))
-		return
+		return forwardOutcome{status: executionoutcome.StatusFailed, errorCode: "no_upstream"}
 	}
 	resp, err := cfg.Upstream.Forward(ctx, raw, nil)
 	if err != nil {
-		var status int
+		status := 0
+		errorCode := "transport"
 		if uerr, ok := err.(*upstream.Error); ok {
 			status = uerr.Status
+			errorCode = uerr.Kind.String()
 		}
 		cfg.Logger.Error("intentgrant upstream forward failed", "err", err.Error(), "upstream_status", status)
 		writeRPC(w, mcp.NewErrorResponse(req.ID, mcp.CodeUpstreamUnavailable,
 			"upstream toolserver error", map[string]any{"upstream_status": status}))
-		return
+		var up *int
+		if status > 0 {
+			up = &status
+		}
+		return forwardOutcome{status: executionoutcome.StatusFailed, upstreamStatus: up, errorCode: errorCode}
 	}
 	if decisionID != "" {
 		w.Header().Set(HeaderDecisionID, decisionID)
@@ -204,6 +281,12 @@ func igForward(w http.ResponseWriter, cfg IntentGrantMCPConfig, ctx context.Cont
 	// Pass the toolserver's JSON-RPC response through unchanged.
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resp.Body)
+	upstreamStatus := resp.Status
+	return forwardOutcome{
+		status:         executionoutcome.StatusExecuted,
+		upstreamStatus: &upstreamStatus,
+		resultHash:     executionoutcome.HashResult(resp.Body),
+	}
 }
 
 func writeRPC(w http.ResponseWriter, resp *mcp.Response) {
