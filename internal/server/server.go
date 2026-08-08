@@ -22,6 +22,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/intentauthz"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
+	"github.com/IntentGate-app/intentgate-gateway/internal/observations"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
 	"github.com/IntentGate-app/intentgate-gateway/internal/payloads"
 	"github.com/IntentGate-app/intentgate-gateway/internal/pii"
@@ -111,6 +112,17 @@ type Config struct {
 	// IntentGrantAuthorizeToken is the service-to-service bearer presented to the
 	// control-plane authorize endpoint.
 	IntentGrantAuthorizeToken string
+	// IntentGrantObservationsURL, when set alongside IntentGrantAuthorizeURL, turns on the
+	// PEP collector: every tools/call on /v1/mcp/ig is captured as a real MCP observation
+	// and shipped to the control-plane ingestion endpoint (Observe → Correlate → Infer),
+	// regardless of ALLOW/DENY. Best-effort and off the decision path. Empty disables it.
+	IntentGrantObservationsURL string
+	// IntentGrantObservationsToken is the bearer presented to the ingestion endpoint;
+	// empty falls back to IntentGrantAuthorizeToken.
+	IntentGrantObservationsToken string
+	// IntentGrantTenant is the tenant stamped on emitted observations. It MUST match the
+	// tenant the observations token authenticates as. Required to enable the collector.
+	IntentGrantTenant string
 	// Upstream is the configured downstream MCP tool server. nil means
 	// no upstream is configured and the gateway returns its stub allow
 	// for authorized calls. Production deployments always supply one.
@@ -363,10 +375,33 @@ func New(cfg Config) *http.Server {
 		if azErr != nil {
 			logger.Warn("intentgrant MCP path disabled: invalid authorize URL", "err", azErr.Error())
 		} else {
+			// Optional PEP collector: capture every tools/call as a real observation and
+			// feed the control-plane Observe → Correlate → Infer pipeline. Enforcement is
+			// unaffected whether or not this is wired.
+			var collector *observations.Collector
+			if cfg.IntentGrantObservationsURL != "" {
+				obsToken := cfg.IntentGrantObservationsToken
+				if obsToken == "" {
+					obsToken = cfg.IntentGrantAuthorizeToken
+				}
+				c, cErr := observations.New(observations.Config{
+					URL:    cfg.IntentGrantObservationsURL,
+					Token:  obsToken,
+					Tenant: cfg.IntentGrantTenant,
+				})
+				if cErr != nil {
+					logger.Warn("intentgrant PEP collector disabled: invalid config", "err", cErr.Error())
+				} else {
+					collector = c
+					logger.Info("intentgrant PEP collector enabled",
+						"ingest", cfg.IntentGrantObservationsURL, "tenant", cfg.IntentGrantTenant)
+				}
+			}
 			mux.Handle("POST /v1/mcp/ig", handlers.NewIntentGrantMCPHandler(handlers.IntentGrantMCPConfig{
-				Logger:   logger,
-				Authz:    azClient,
-				Upstream: cfg.Upstream,
+				Logger:    logger,
+				Authz:     azClient,
+				Upstream:  cfg.Upstream,
+				Collector: collector,
 			}))
 			logger.Info("intentgrant MCP enforcement path enabled", "route", "POST /v1/mcp/ig")
 		}

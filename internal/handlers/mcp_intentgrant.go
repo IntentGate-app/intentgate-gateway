@@ -10,6 +10,7 @@ import (
 
 	"github.com/IntentGate-app/intentgate-gateway/internal/intentauthz"
 	"github.com/IntentGate-app/intentgate-gateway/internal/mcp"
+	"github.com/IntentGate-app/intentgate-gateway/internal/observations"
 	"github.com/IntentGate-app/intentgate-gateway/internal/upstream"
 )
 
@@ -41,6 +42,14 @@ type IntentGrantMCPConfig struct {
 	AgentHeader string
 	// AuthorizeTimeout bounds the control-plane call; zero uses the client default.
 	AuthorizeTimeout time.Duration
+	// Collector, when set, captures every tools/call as a real MCP observation and
+	// ships it to the control-plane ingestion pipeline (Observe → Correlate → Infer).
+	// Capture is best-effort, off the decision path, and happens REGARDLESS of the
+	// authorization result — attempted/denied calls are observations too. nil disables
+	// capture (enforcement is unchanged).
+	Collector *observations.Collector
+	// CollectorTimeout bounds one best-effort emit; zero uses the collector default.
+	CollectorTimeout time.Duration
 }
 
 // NewIntentGrantMCPHandler returns POST /v1/mcp/ig.
@@ -96,6 +105,26 @@ func NewIntentGrantMCPHandler(cfg IntentGrantMCPConfig) http.Handler {
 			writeRPC(w, mcp.NewErrorResponse(req.ID, mcp.CodeInvalidParams,
 				"missing tool name", map[string]any{"reason": "MISSING_TOOL"}))
 			return
+		}
+
+		// Capture execution truth at the interception point — BEFORE and INDEPENDENT of
+		// the authorization decision, so denied first-time calls are still observed and
+		// Authority Mining can propose the very first authority for a new agent→tool edge.
+		// Fire-and-forget on a detached context so it neither blocks nor fails the decision.
+		if cfg.Collector != nil {
+			agent, tool, method := agentRef, params.Name, req.Method
+			go func() {
+				to := cfg.CollectorTimeout
+				if to <= 0 {
+					to = observations.DefaultTimeout
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), to)
+				defer cancel()
+				if err := cfg.Collector.Emit(ctx, agent, tool, method); err != nil {
+					cfg.Logger.Warn("observation emit failed (non-fatal; enforcement unaffected)",
+						"tool", tool, "agent", agent, "err", err.Error())
+				}
+			}()
 		}
 
 		azCtx := r.Context()
