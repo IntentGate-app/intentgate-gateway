@@ -19,6 +19,7 @@ import (
 	"github.com/IntentGate-app/intentgate-gateway/internal/extractor"
 	"github.com/IntentGate-app/intentgate-gateway/internal/faultisolation"
 	"github.com/IntentGate-app/intentgate-gateway/internal/handlers"
+	"github.com/IntentGate-app/intentgate-gateway/internal/intentauthz"
 	"github.com/IntentGate-app/intentgate-gateway/internal/killswitch"
 	"github.com/IntentGate-app/intentgate-gateway/internal/metrics"
 	"github.com/IntentGate-app/intentgate-gateway/internal/outputschema"
@@ -103,6 +104,13 @@ type Config struct {
 	// async (return pending immediately, resume by header). Default false
 	// preserves the synchronous hold. See handlers.MCPHandlerConfig.
 	ApprovalAsync bool
+	// IntentGrantAuthorizeURL, when set, mounts the dedicated new-authority MCP
+	// enforcement path (POST /v1/mcp/ig) that authorizes every tools/call against
+	// the BA-/IG- control plane before forwarding. Empty leaves the path unmounted.
+	IntentGrantAuthorizeURL string
+	// IntentGrantAuthorizeToken is the service-to-service bearer presented to the
+	// control-plane authorize endpoint.
+	IntentGrantAuthorizeToken string
 	// Upstream is the configured downstream MCP tool server. nil means
 	// no upstream is configured and the gateway returns its stub allow
 	// for authorized calls. Production deployments always supply one.
@@ -340,6 +348,29 @@ func New(cfg Config) *http.Server {
 		EastWest:           cfg.EastWest,
 		ZoneScope:          cfg.ZoneScope,
 	}))
+
+	// Dedicated new-authority MCP enforcement path (POST /v1/mcp/ig). Mounted only
+	// when the control-plane authorize URL is configured. The legacy /v1/mcp pipeline
+	// above is untouched: here the governed BA-/IG- decision is the SOLE authority, so
+	// we can prove BA → IG → DEC → physical MCP enforcement without any ambiguous
+	// overlap with the AUTH-/capability model. Fails closed if the control plane is
+	// unreachable (the toolserver is never called without an ALLOW).
+	if cfg.IntentGrantAuthorizeURL != "" {
+		azClient, azErr := intentauthz.New(intentauthz.Config{
+			URL:   cfg.IntentGrantAuthorizeURL,
+			Token: cfg.IntentGrantAuthorizeToken,
+		})
+		if azErr != nil {
+			logger.Warn("intentgrant MCP path disabled: invalid authorize URL", "err", azErr.Error())
+		} else {
+			mux.Handle("POST /v1/mcp/ig", handlers.NewIntentGrantMCPHandler(handlers.IntentGrantMCPConfig{
+				Logger:   logger,
+				Authz:    azClient,
+				Upstream: cfg.Upstream,
+			}))
+			logger.Info("intentgrant MCP enforcement path enabled", "route", "POST /v1/mcp/ig")
+		}
+	}
 
 	// Reply-side outbound gateway (A1). Inspects the agent's proposed
 	// final answer to the user, reusing the same content filter that
